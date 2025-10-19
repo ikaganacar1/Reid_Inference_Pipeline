@@ -1,0 +1,17 @@
+# Core dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.19.0
+opencv-python>=4.5.0
+ultralytics>=8.0.0
+pyyaml>=5.4.0
+
+# Optional dependencies for TensorRT
+# Uncomment if using TensorRT acceleration
+# tensorrt>=8.0.0
+# pycuda>=2021.1
+
+# Development dependencies
+# pytest>=7.0.0
+# black>=22.0.0
+# flake8>=4.0.0
