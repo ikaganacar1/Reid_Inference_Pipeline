@@ -13,12 +13,12 @@ detection:
   use_tensorrt: false
 
 reid:
-  model_path: reid_ltcc.pth  # Your trained model
+  model_path: reid_ltcc.engine
   embedding_dim: 2048
   batch_size: 16
-  image_size_h: 256
-  image_size_w: 128
-  use_tensorrt: false
+  image_size_h: 384  # was 256
+  image_size_w: 192  # was 128
+  use_tensorrt: true
   tensorrt_precision: fp16
 
 gallery:

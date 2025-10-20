@@ -67,6 +67,8 @@ class ProductionReIDPipeline:
                  queue_size_processing: int = 50,
                  queue_size_output: int = 20,
                  enable_display: bool = True,
+                 use_tensorrt: bool = False,
+                 tensorrt_precision: str = 'fp16',
                  logger: Optional[logging.Logger] = None):
         """
         Initialize production pipeline.
@@ -106,6 +108,8 @@ class ProductionReIDPipeline:
             model_path=reid_model_path,
             device=device,
             batch_size=reid_batch_size,
+            use_tensorrt=use_tensorrt,
+            tensorrt_precision=tensorrt_precision,
             logger=self.logger
         )
         

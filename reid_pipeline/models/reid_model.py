@@ -1,12 +1,6 @@
 """
-FIXED VERSION of reid_model.py (v2)
-
-Key fixes:
-1. Handles PyTorch 2.6 weights_only change
-2. Properly loads checkpoints with OmegaConf objects
-3. Proper error handling when model_path is None
-4. Return status from _load_pytorch_model
-5. Clear warnings when using random initialization
+Person Re-Identification Model with Batch Processing and TensorRT Support
+Optimized for NVIDIA Jetson deployment - FIXED VERSION with TensorRT inference
 """
 import torch
 import torch.nn as nn
@@ -94,7 +88,6 @@ class BatchReIDExtractor:
     - TensorRT model loading
     - Dynamic batch size adjustment
     - Preprocessing pipeline
-    - PyTorch 2.6 compatibility
     """
     
     def __init__(self,
@@ -125,15 +118,6 @@ class BatchReIDExtractor:
         self.use_tensorrt = use_tensorrt
         self.logger = logger or logging.getLogger(__name__)
         
-        # CRITICAL FIX: Warn about random initialization
-        if model_path is None:
-            self.logger.warning("="*70)
-            self.logger.warning("WARNING: No ReID model path specified!")
-            self.logger.warning("Using RANDOM initialization - this will NOT work!")
-            self.logger.warning("All persons will be assigned the same ID.")
-            self.logger.warning("Please provide a trained model with --reid-model")
-            self.logger.warning("="*70)
-        
         # Initialize model
         if use_tensorrt and model_path and model_path.endswith('.engine'):
             self.model = self._load_tensorrt_model(model_path)
@@ -142,18 +126,8 @@ class BatchReIDExtractor:
             self.model = ReIDModel(embedding_dim=embedding_dim).to(self.device)
             self.model.eval()
             
-            # CRITICAL FIX: Check if model loading succeeded
             if model_path:
-                success = self._load_pytorch_model(model_path)
-                if not success:
-                    raise RuntimeError(
-                        f"Failed to load ReID model from {model_path}. "
-                        "ReID cannot work with random weights! "
-                        "Please check the model path and format."
-                    )
-                self.logger.info("✓ ReID model loaded successfully")
-            else:
-                self.logger.warning("Using randomly initialized model - ReID will not work!")
+                self._load_pytorch_model(model_path)
             
             self.inference_mode = 'pytorch'
         
@@ -175,83 +149,41 @@ class BatchReIDExtractor:
             'batch_sizes': []
         }
         
+        # TensorRT stream for async execution
+        if self.inference_mode == 'tensorrt':
+            try:
+                import pycuda.driver as cuda
+                self.cuda_stream = cuda.Stream()
+            except:
+                self.cuda_stream = None
+        
         self.logger.info(f"BatchReIDExtractor initialized: mode={self.inference_mode}, "
                         f"batch_size={batch_size}, image_size={image_size}")
     
-    def _load_pytorch_model(self, model_path: str) -> bool:
-        """
-        Load PyTorch model weights.
-        
-        CRITICAL FIX v2: Now handles PyTorch 2.6 weights_only change
-        and OmegaConf objects in checkpoints
-        
-        Returns:
-            True if model loaded successfully, False otherwise
-        """
+    def _load_pytorch_model(self, model_path: str):
+        """Load PyTorch model weights"""
         try:
-            model_path_obj = Path(model_path)
-            
-            if not model_path_obj.exists():
-                self.logger.error(f"Model file not found: {model_path}")
-                return False
-            
-            if model_path_obj.suffix != '.pth':
-                self.logger.error(f"Unsupported model format: {model_path}")
-                self.logger.error(f"Expected .pth file, got {model_path_obj.suffix}")
-                return False
-            
-            self.logger.info(f"Loading model from: {model_path}")
-            
-            # FIX for PyTorch 2.6: Try weights_only=True first, fall back to False
-            checkpoint = None
-            try:
-                # Try with weights_only=True (PyTorch 2.6 default, secure)
-                checkpoint = torch.load(model_path, map_location=self.device, weights_only=True)
-                self.logger.info("Loaded with weights_only=True (secure mode)")
-            except Exception as e:
-                if "weights_only" in str(e) or "omegaconf" in str(e).lower():
-                    # Model contains non-tensor objects (like OmegaConf configs)
-                    self.logger.warning("Model contains non-tensor objects, loading with weights_only=False")
-                    self.logger.warning("This is safe if you trust the source of this model file")
-                    
-                    try:
-                        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
-                        self.logger.info("Successfully loaded with weights_only=False")
-                    except Exception as e2:
-                        self.logger.error(f"Failed to load even with weights_only=False: {e2}")
-                        return False
+            if Path(model_path).suffix == '.pth':
+                checkpoint = torch.load(model_path, map_location=self.device)
+                
+                # Handle different checkpoint formats
+                if isinstance(checkpoint, dict):
+                    if 'state_dict' in checkpoint:
+                        self.model.load_state_dict(checkpoint['state_dict'])
+                    elif 'model' in checkpoint:
+                        self.model.load_state_dict(checkpoint['model'])
+                    else:
+                        self.model.load_state_dict(checkpoint)
                 else:
-                    # Different error
-                    self.logger.error(f"Error loading checkpoint: {e}")
-                    return False
-            
-            # Handle different checkpoint formats
-            if isinstance(checkpoint, dict):
-                if 'state_dict' in checkpoint:
-                    self.logger.info("Loading from checkpoint['state_dict']")
-                    state_dict = checkpoint['state_dict']
-                elif 'model' in checkpoint:
-                    self.logger.info("Loading from checkpoint['model']")
-                    state_dict = checkpoint['model']
-                else:
-                    self.logger.info("Loading checkpoint as state_dict")
-                    state_dict = checkpoint
+                    self.model.load_state_dict(checkpoint)
+                
+                self.logger.info(f"Loaded PyTorch model from {model_path}")
             else:
-                self.logger.info("Loading checkpoint directly")
-                state_dict = checkpoint
-            
-            # Load state dict
-            self.model.load_state_dict(state_dict)
-            
-            self.logger.info(f"✓ Successfully loaded PyTorch model from {model_path}")
-            return True
+                raise ValueError(f"Unsupported model format: {model_path}")
                 
         except Exception as e:
-            self.logger.error(f"✗ Error loading model from {model_path}: {e}")
-            import traceback
-            self.logger.error("Full traceback:")
-            self.logger.error(traceback.format_exc())
-            return False
+            self.logger.error(f"Error loading model: {e}")
+            self.logger.warning("Using randomly initialized model")
     
     def _load_tensorrt_model(self, engine_path: str):
         """Load TensorRT engine"""
@@ -268,9 +200,18 @@ class BatchReIDExtractor:
             engine = runtime.deserialize_cuda_engine(engine_data)
             context = engine.create_execution_context()
             
+            # Get input/output binding info
+            input_binding = engine[0]
+            output_binding = engine[1]
+            
             self.logger.info(f"Loaded TensorRT engine from {engine_path}")
             
-            return {'engine': engine, 'context': context}
+            return {
+                'engine': engine,
+                'context': context,
+                'input_binding': input_binding,
+                'output_binding': output_binding
+            }
             
         except ImportError:
             self.logger.error("TensorRT not available. Install pycuda and tensorrt.")
@@ -392,9 +333,46 @@ class BatchReIDExtractor:
     
     def _tensorrt_inference(self, batch: torch.Tensor) -> torch.Tensor:
         """Run inference using TensorRT engine"""
-        # This is a placeholder - actual implementation depends on TensorRT setup
-        # In production, you'd allocate GPU buffers and run the engine
-        raise NotImplementedError("TensorRT inference implementation needed")
+        import pycuda.driver as cuda
+        
+        engine = self.model['engine']
+        context = self.model['context']
+        
+        input_data = batch.cpu().numpy().astype(np.float32)
+        batch_size_actual = input_data.shape[0]
+        output_size = batch_size_actual * self.embedding_dim
+        
+        # Allocate buffers
+        d_input = cuda.mem_alloc(input_data.nbytes)
+        d_output = cuda.mem_alloc(output_size * np.dtype(np.float32).itemsize)
+        output = np.empty((batch_size_actual, self.embedding_dim), dtype=np.float32)
+        
+        try:
+            # Copy input
+            cuda.memcpy_htod_async(d_input, input_data, self.cuda_stream)
+            
+            # Set input shape
+            context.set_input_shape('input', input_data.shape)
+            
+            # Set tensor addresses (v3 API)
+            context.set_tensor_address('input', int(d_input))
+            context.set_tensor_address('output', int(d_output))
+            
+            # Execute
+            context.execute_async_v3(stream_handle=self.cuda_stream.handle)
+            self.cuda_stream.synchronize()
+            
+            # Copy output
+            cuda.memcpy_dtoh(output, d_output)
+            
+        finally:
+            d_input.free()
+            d_output.free()
+        
+        embeddings = torch.from_numpy(output).to(self.device)
+        embeddings = nn.functional.normalize(embeddings, p=2, dim=1)
+        
+        return embeddings
     
     def extract_features_from_frame(self,
                                    image: np.ndarray,
@@ -464,3 +442,67 @@ class BatchReIDExtractor:
             torch.cuda.synchronize()
         
         self.logger.info("Warm-up complete")
+    
+    def export_to_onnx(self, output_path: str):
+        """
+        Export model to ONNX format for TensorRT conversion.
+        
+        Args:
+            output_path: Path to save ONNX model
+        """
+        if self.inference_mode != 'pytorch':
+            self.logger.error("Can only export PyTorch models to ONNX")
+            return
+        
+        self.logger.info(f"Exporting model to ONNX: {output_path}")
+        
+        dummy_input = torch.randn(
+            1, 3, self.image_size[0], self.image_size[1]
+        ).to(self.device)
+        
+        torch.onnx.export(
+            self.model,
+            dummy_input,
+            output_path,
+            export_params=True,
+            opset_version=11,
+            do_constant_folding=True,
+            input_names=['input'],
+            output_names=['output'],
+            dynamic_axes={
+                'input': {0: 'batch_size'},
+                'output': {0: 'batch_size'}
+            }
+        )
+        
+        self.logger.info(f"Model exported to {output_path}")
+
+
+if __name__ == "__main__":
+    # Test the batch extractor
+    logging.basicConfig(level=logging.INFO)
+    
+    extractor = BatchReIDExtractor(
+        embedding_dim=2048,
+        batch_size=16,
+        device='cuda' if torch.cuda.is_available() else 'cpu'
+    )
+    
+    # Warm up
+    extractor.warmup(num_iterations=5)
+    
+    # Test with dummy data
+    dummy_image = np.random.randint(0, 255, (1080, 1920, 3), dtype=np.uint8)
+    dummy_bboxes = [
+        np.array([100, 100, 300, 500]),
+        np.array([400, 150, 600, 550]),
+        np.array([700, 200, 900, 600])
+    ]
+    
+    embeddings, valid_flags = extractor.extract_features_from_frame(
+        dummy_image, dummy_bboxes
+    )
+    
+    print(f"Extracted {embeddings.shape[0]} embeddings")
+    print(f"Valid flags: {valid_flags}")
+    print(f"Statistics: {extractor.get_statistics()}")

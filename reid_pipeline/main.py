@@ -77,6 +77,8 @@ def run_pipeline(args):
         reid_threshold_new=config.gallery.similarity_threshold_new,
         gallery_max_size=config.gallery.max_size,
         reid_batch_size=config.reid.batch_size,
+        use_tensorrt=config.reid.use_tensorrt,
+        tensorrt_precision=config.reid.tensorrt_precision,
         queue_size_input=config.queues.input_queue_size,
         queue_size_processing=config.queues.processing_queue_size,
         queue_size_output=config.queues.output_queue_size,

@@ -11,6 +11,4 @@ PYTHONPATH="$SCRIPT_DIR/.." python ../reid_pipeline/main.py run \
   --config custom_config_fixed.yaml \
   --input MOT16-05.mp4 \
   --output result_fixed.mp4 \
-  --yolo-model yolo11n.pt \
-  --reid-model reid_ltcc.engine \
   --log-level INFO
