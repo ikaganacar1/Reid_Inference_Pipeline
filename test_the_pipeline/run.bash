@@ -10,5 +10,7 @@ cd "$SCRIPT_DIR"
 PYTHONPATH="$SCRIPT_DIR/.." python ../reid_pipeline/main.py run \
   --config custom_config_fixed.yaml \
   --input MOT16-05.mp4 \
-  --output result_fixed.mp4 \
+  --output MOT16-05_result.mp4 \
+  #--input /home/ika/yzlm/Reid_Inference_Pipeline/test_the_pipeline/reid_test_ika.mp4 \
+  #--output /home/ika/yzlm/Reid_Inference_Pipeline/test_the_pipeline/reid_test_ika_result.mp4 \
   --log-level INFO

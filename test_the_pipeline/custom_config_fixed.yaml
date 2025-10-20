@@ -1,5 +1,3 @@
-# Custom Configuration for ReID Pipeline
-# This fixes the queue management issues
 
 device: cuda
 enable_display: true
@@ -10,22 +8,22 @@ detection:
   iou_threshold: 0.55
   conf_high: 0.8
   conf_medium: 0.3
-  use_tensorrt: false
+  use_tensorrt: true 
 
 reid:
   model_path: reid_ltcc.engine
   embedding_dim: 2048
-  batch_size: 16
-  image_size_h: 384  # was 256
-  image_size_w: 192  # was 128
+  batch_size: 2
+  image_size_h: 384
+  image_size_w: 192
   use_tensorrt: true
   tensorrt_precision: fp16
 
 gallery:
   max_size: 500
   buffer_capacity: 10
-  similarity_threshold_match: 0.70
-  similarity_threshold_new: 0.50
+  similarity_threshold_match: 0.50  
+  similarity_threshold_new: 0.70  
   quality_admission_threshold: 0.91
   ttl_frames_crowded: 30
   ttl_frames_sparse: 150
@@ -33,10 +31,9 @@ gallery:
   ema_alpha_low_conf: 0.1
 
 queues:
-  # FIXED: Increased queue sizes to prevent frame drops
-  input_queue_size: 30       # Was 10, increased to 30
-  processing_queue_size: 100  # Was 50, increased to 100
-  output_queue_size: 50       # Was 20, increased to 50
+  input_queue_size: 15       # Was 30 (Original: 10)
+  processing_queue_size: 30  # Was 100 (Original: 50)
+  output_queue_size: 30      # Was 50 (Original: 20)
 
 monitoring:
   enable_monitoring: true
@@ -51,4 +48,4 @@ degradation:
   gpu_threshold_tier2: 0.9
   memory_threshold_tier1: 0.85
   memory_threshold_tier2: 0.9
-  queue_depth_threshold: 45
+  queue_depth_threshold: 15 

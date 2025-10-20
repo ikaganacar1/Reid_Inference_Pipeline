@@ -2,3 +2,5 @@
 *.mp4
 *.pt
 *.pyc
+*.onnx
+*.engine

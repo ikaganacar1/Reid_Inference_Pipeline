@@ -175,17 +175,38 @@ class ProductionReIDPipeline:
         """Thread 1: Video capture"""
         self.logger.info("Capture thread started")
         
-        cap = cv2.VideoCapture(video_source)
-        
+        # Try to convert video_source to int for camera, else it's a file
+        is_camera = False
+        try:
+            video_source_int = int(video_source)
+            cap = cv2.VideoCapture(video_source_int)
+            is_camera = True
+            self.logger.info(f"Opening camera source: {video_source_int}")
+        except ValueError:
+            cap = cv2.VideoCapture(str(video_source)) # Ensure it's a string
+            self.logger.info(f"Opening video file: {video_source}")
+
         if not cap.isOpened():
             self.logger.error(f"Failed to open video source: {video_source}")
             self.running = False
             return
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0 or is_camera:
+            # Use 30 for cameras or if FPS is not available/unreliable
+            fps = 30.0
+            if not is_camera:
+                 self.logger.warning(f"Video FPS not found, defaulting to {fps} FPS.")
         
+        delay_between_frames = 1.0 / fps
+        self.logger.info(f"Limiting capture to {fps:.2f} FPS (Delay: {delay_between_frames*1000:.2f}ms)")
+
         frame_id = 0
         
         try:
             while self.running:
+                frame_read_start = time.time()
+
                 ret, frame = cap.read()
                 
                 if not ret:
@@ -200,25 +221,34 @@ class ProductionReIDPipeline:
                 )
                 
                 try:
-                    # Try to put in queue (drop if full)
+                    # Original logic (which is fine, just needs the sleep)
                     self.input_queue.put(packet, block=False)
                     self.stats['frames_captured'] += 1
                     frame_id += 1
                 except queue.Full:
-                    self.logger.warning("Input queue full, dropping frame")
+                    # This will now happen much less, if at all
+                    self.logger.warning("Input queue full, dropping frame (pipeline is lagging)")
                     # Drop oldest frame to prevent blocking
                     try:
                         self.input_queue.get_nowait()
                         self.input_queue.put(packet, block=False)
-                    except:
-                        pass
+                    except queue.Empty:
+                        pass # Another thread emptied it
                 
                 # Track queue size
                 self.stats['queue_sizes']['input'].append(self.input_queue.qsize())
+
+                if not is_camera: 
+                    elapsed = time.time() - frame_read_start
+                    sleep_time = delay_between_frames - elapsed
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
         
         finally:
             cap.release()
             self.logger.info("Capture thread stopped")
+            self.logger.info("Capture thread sending shutdown signal...")
+            self.input_queue.put(None) # Signal for next thread
     
     def _detection_thread(self):
         """Thread 2: Object detection"""
@@ -229,6 +259,13 @@ class ProductionReIDPipeline:
                 try:
                     # Get frame from input queue
                     packet = self.input_queue.get(timeout=1.0)
+                    
+                    if packet is None: # Check for sentinel
+                        self.logger.info("Detection thread received shutdown signal.")
+                        self.detection_queue.put(None) # Pass sentinel to next thread
+                        self.running = False # Help signal other threads
+                        break # Exit loop
+                    
                 except queue.Empty:
                     continue
                 
@@ -269,6 +306,13 @@ class ProductionReIDPipeline:
                 try:
                     # Get detection packet
                     packet = self.detection_queue.get(timeout=1.0)
+                    
+                    if packet is None: # Check for sentinel
+                        self.logger.info("ReID tracking thread received shutdown signal.")
+                        self.output_queue.put(None) # Pass sentinel to next thread
+                        self.running = False # Help signal other threads
+                        break # Exit loop
+                    
                 except queue.Empty:
                     continue
                 
@@ -368,6 +412,12 @@ class ProductionReIDPipeline:
                 try:
                     # Get processed packet
                     packet = self.output_queue.get(timeout=1.0)
+                    
+                    if packet is None: # Check for sentinel
+                        self.logger.info("Display thread received shutdown signal.")
+                        self.running = False # Signal other threads
+                        break # Exit loop
+                    
                 except queue.Empty:
                     continue
                 
@@ -514,17 +564,27 @@ class ProductionReIDPipeline:
         for thread in self.threads:
             thread.start()
         
-        # Wait for threads
         try:
+            # Wait for threads to finish (or for interrupt)
             for thread in self.threads:
                 thread.join()
         except KeyboardInterrupt:
-            self.logger.info("Keyboard interrupt received")
+            self.logger.info("Keyboard interrupt received. Stopping threads...")
             self.running = False
-        
-        # Cleanup
-        self.logger.info("Pipeline stopped")
-        self._print_summary()
+            # Wait for threads to acknowledge the stop
+            for thread in self.threads:
+                if thread.is_alive():
+                    thread.join(timeout=1.0)
+        finally:
+            # Cleanup
+            self.logger.info("Shutting down pipeline and cleaning up resources...")
+            
+            # Explicitly clean up CUDA context from ReID extractor
+            if self.reid_extractor.inference_mode == 'tensorrt':
+                self.reid_extractor.cleanup()
+                
+            self.logger.info("Pipeline stopped")
+            self._print_summary()
     
     def stop(self):
         """Stop the pipeline"""

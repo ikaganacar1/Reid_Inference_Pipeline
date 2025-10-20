@@ -95,7 +95,7 @@ class BatchReIDExtractor:
                  device: str = 'cuda',
                  embedding_dim: int = 2048,
                  batch_size: int = 16,
-                 image_size: Tuple[int, int] = (256, 128),
+                 image_size: Tuple[int, int] = (384, 192),  # FIXED: Match TensorRT engine dimensions
                  use_tensorrt: bool = False,
                  tensorrt_precision: str = 'fp16',
                  logger: Optional[logging.Logger] = None):
@@ -107,7 +107,7 @@ class BatchReIDExtractor:
             device: Device for inference ('cuda' or 'cpu')
             embedding_dim: Embedding dimensionality
             batch_size: Target batch size for inference
-            image_size: (height, width) for person crops
+            image_size: (height, width) for person crops - FIXED to (384, 192) for TensorRT
             use_tensorrt: Use TensorRT engine
             tensorrt_precision: 'fp32', 'fp16', or 'int8'
         """
@@ -202,17 +202,51 @@ class BatchReIDExtractor:
             engine = runtime.deserialize_cuda_engine(engine_data)
             context = engine.create_execution_context()
             
-            # Get input/output binding info
-            input_binding = engine[0]
-            output_binding = engine[1]
+            # --- START OF FIX ---
+            # FIXED: Use the new TensorRT API (>= 8.0) to get I/O tensor names.
+            # The 'num_bindings', 'get_binding_name', and 'binding_is_input'
+            # attributes are deprecated and were removed in newer versions.
             
+            num_io_tensors = engine.num_io_tensors # Replaced num_bindings
+            input_name = None
+            output_name = None
+            
+            tensor_names = [engine.get_tensor_name(i) for i in range(num_io_tensors)]
+            self.logger.info(f"Found {num_io_tensors} I/O tensors: {tensor_names}")
+
+            for name in tensor_names:
+                # Replaced binding_is_input(i)
+                if engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT: 
+                    if input_name is None:
+                        input_name = name
+                        self.logger.info(f"Using TensorRT input tensor: {name}")
+                    else:
+                        self.logger.warning(f"Found multiple input tensors. Using first one: {input_name}")
+                else: # It's an output
+                    if output_name is None:
+                        output_name = name
+                        self.logger.info(f"Using TensorRT output tensor: {name}")
+                    else:
+                        self.logger.warning(f"Found multiple output tensors. Using first one: {output_name}")
+            
+            # --- END OF FIX ---
+
+            # If names not found, use defaults (from original logic)
+            if input_name is None:
+                input_name = 'input'
+                self.logger.warning(f"No input tensor found. Defaulting to: {input_name}")
+            if output_name is None:
+                output_name = 'fc_pred'  # FIXED: Use correct output name from error messages
+                self.logger.warning(f"No output tensor found. Defaulting to: {output_name}")
+                
             self.logger.info(f"Loaded TensorRT engine from {engine_path}")
+            self.logger.info(f"Input name: {input_name}, Output name: {output_name}")
             
             return {
                 'engine': engine,
                 'context': context,
-                'input_binding': input_binding,
-                'output_binding': output_binding
+                'input_name': input_name,
+                'output_name': output_name
             }
             
         except ImportError:
@@ -334,11 +368,13 @@ class BatchReIDExtractor:
         return embeddings
     
     def _tensorrt_inference(self, batch: torch.Tensor) -> torch.Tensor:
-        """Run inference using TensorRT engine"""
+        """Run inference using TensorRT engine - FIXED VERSION"""
         import pycuda.driver as cuda
         
         engine = self.model['engine']
         context = self.model['context']
+        input_name = self.model['input_name']
+        output_name = self.model['output_name']
         
         # FIX: Push context for worker thread
         if hasattr(self, 'cuda_ctx'):
@@ -355,9 +391,12 @@ class BatchReIDExtractor:
             
             try:
                 cuda.memcpy_htod_async(d_input, input_data, self.cuda_stream)
-                context.set_input_shape('input', input_data.shape)
-                context.set_tensor_address('input', int(d_input))
-                context.set_tensor_address('output', int(d_output))
+                
+                # FIXED: Use correct tensor names
+                context.set_input_shape(input_name, input_data.shape)
+                context.set_tensor_address(input_name, int(d_input))
+                context.set_tensor_address(output_name, int(d_output))  # FIXED: Use correct output name
+                
                 context.execute_async_v3(stream_handle=self.cuda_stream.handle)
                 self.cuda_stream.synchronize()
                 cuda.memcpy_dtoh(output, d_output)
@@ -374,13 +413,15 @@ class BatchReIDExtractor:
             if hasattr(self, 'cuda_ctx'):
                 self.cuda_ctx.pop()
                 
-    def __del__(self):
-        """Cleanup CUDA context"""
+    def cleanup(self):
+        """Explicitly clean up CUDA context."""
         if hasattr(self, 'cuda_ctx'):
             try:
+                self.logger.info("Detaching CUDA context...")
                 self.cuda_ctx.detach()
-            except:
-                pass
+                self.logger.info("CUDA context detached.")
+            except Exception as e:
+                self.logger.error(f"Error detaching CUDA context: {e}")
             
     def extract_features_from_frame(self,
                                    image: np.ndarray,
@@ -476,10 +517,10 @@ class BatchReIDExtractor:
             opset_version=11,
             do_constant_folding=True,
             input_names=['input'],
-            output_names=['output'],
+            output_names=['fc_pred'],  # FIXED: Use correct output name
             dynamic_axes={
                 'input': {0: 'batch_size'},
-                'output': {0: 'batch_size'}
+                'fc_pred': {0: 'batch_size'}  # FIXED: Use correct output name
             }
         )
         
@@ -490,9 +531,11 @@ if __name__ == "__main__":
     # Test the batch extractor
     logging.basicConfig(level=logging.INFO)
     
+    # FIXED: Use correct dimensions
     extractor = BatchReIDExtractor(
         embedding_dim=2048,
         batch_size=16,
+        image_size=(384, 192),  # FIXED: Match TensorRT engine dimensions
         device='cuda' if torch.cuda.is_available() else 'cpu'
     )
     
