@@ -142,9 +142,40 @@ class TensorRTConverter:
                     return False
             
             # Configure builder
+            # Configure builder
             config = builder.create_builder_config()
-            config.max_workspace_size = workspace_size
+            config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_size)
             
+            # --- START FIX FOR DYNAMIC INPUTS ---
+            self.logger.info("Setting up optimization profile for dynamic inputs...")
+            profile = builder.create_optimization_profile()
+            
+            # Get the input tensor
+            # We assume the first input (index 0) is the dynamic one
+            input_tensor = network.get_input(0)
+            input_name = input_tensor.name
+            
+            # Get static shape (C, H, W)
+            # The input_tensor.shape will be something like [-1, 3, 256, 128]
+            static_shape = tuple(input_tensor.shape[1:])
+            
+            # Define min, opt, and max shapes for the dynamic input
+            # We use the max_batch_size passed to this function
+            min_shape = (1,) + static_shape
+            opt_shape = (max(1, max_batch_size // 2),) + static_shape # A reasonable default optimal
+            max_shape = (max_batch_size,) + static_shape
+            
+            self.logger.info(f"Setting profile for input '{input_name}':")
+            self.logger.info(f"  MIN shape: {min_shape}")
+            self.logger.info(f"  OPT shape: {opt_shape}")
+            self.logger.info(f"  MAX shape: {max_shape}")
+            
+            profile.set_shape(input_name, min_shape, opt_shape, max_shape)
+            
+            # Add profile to config
+            config.add_optimization_profile(profile)
+            # --- END FIX ---
+
             # Set precision
             if precision == 'fp16':
                 config.set_flag(trt.BuilderFlag.FP16)
@@ -169,16 +200,18 @@ class TensorRTConverter:
             
             # Build engine
             self.logger.info("Building TensorRT engine (this may take several minutes)...")
-            engine = builder.build_engine(network, config)
             
-            if engine is None:
-                self.logger.error("Failed to build engine")
+            serialized_network = builder.build_serialized_network(network, config)
+            
+            if serialized_network is None:
+                self.logger.error("Failed to build serialized network")
                 return False
             
             # Save engine
+            self.logger.info("Saving serialized network to file...")
             engine_path.parent.mkdir(parents=True, exist_ok=True)
             with open(engine_path, 'wb') as f:
-                f.write(engine.serialize())
+                f.write(serialized_network) # Write the serialized data directly
             
             self.logger.info(f"TensorRT engine saved to: {engine_path}")
             return True
@@ -419,14 +452,7 @@ if __name__ == "__main__":
     
     converter = TensorRTConverter()
     
-    # Example: Convert YOLO model
-    # engine_path = converter.convert_yolo_to_tensorrt(
-    #     Path('yolo11n.pt'),
-    #     Path('models/tensorrt'),
-    #     precision='fp16'
-    # )
-    
-    print("TensorRT converter ready")
-    print("Example usage:")
-    print("  converter.convert_yolo_to_tensorrt('yolo11n.pt', 'output/', 'fp16')")
-    print("  converter.convert_reid_to_tensorrt(model, 'output/', precision='int8')")
+    converter.onnx_to_tensorrt(
+            onnx_path=Path("/home/ika/yzlm/Reid_Inference_Pipeline/test_the_pipeline/reid_ltcc.onnx"),
+            engine_path=Path("/home/ika/yzlm/Reid_Inference_Pipeline/test_the_pipeline/reid_ltcc.engine")
+        )
