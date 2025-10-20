@@ -190,7 +190,9 @@ class BatchReIDExtractor:
         try:
             import tensorrt as trt
             import pycuda.driver as cuda
-            import pycuda.autoinit
+            
+            cuda.init()
+            self.cuda_ctx = cuda.Device(0).make_context()  # ADDED: Store context
             
             # Load engine
             with open(engine_path, 'rb') as f:
@@ -338,42 +340,48 @@ class BatchReIDExtractor:
         engine = self.model['engine']
         context = self.model['context']
         
-        input_data = batch.cpu().numpy().astype(np.float32)
-        batch_size_actual = input_data.shape[0]
-        output_size = batch_size_actual * self.embedding_dim
-        
-        # Allocate buffers
-        d_input = cuda.mem_alloc(input_data.nbytes)
-        d_output = cuda.mem_alloc(output_size * np.dtype(np.float32).itemsize)
-        output = np.empty((batch_size_actual, self.embedding_dim), dtype=np.float32)
+        # FIX: Push context for worker thread
+        if hasattr(self, 'cuda_ctx'):
+            self.cuda_ctx.push()
         
         try:
-            # Copy input
-            cuda.memcpy_htod_async(d_input, input_data, self.cuda_stream)
+            input_data = batch.cpu().numpy().astype(np.float32)
+            batch_size_actual = input_data.shape[0]
+            output_size = batch_size_actual * self.embedding_dim
             
-            # Set input shape
-            context.set_input_shape('input', input_data.shape)
+            d_input = cuda.mem_alloc(input_data.nbytes)
+            d_output = cuda.mem_alloc(output_size * np.dtype(np.float32).itemsize)
+            output = np.empty((batch_size_actual, self.embedding_dim), dtype=np.float32)
             
-            # Set tensor addresses (v3 API)
-            context.set_tensor_address('input', int(d_input))
-            context.set_tensor_address('output', int(d_output))
+            try:
+                cuda.memcpy_htod_async(d_input, input_data, self.cuda_stream)
+                context.set_input_shape('input', input_data.shape)
+                context.set_tensor_address('input', int(d_input))
+                context.set_tensor_address('output', int(d_output))
+                context.execute_async_v3(stream_handle=self.cuda_stream.handle)
+                self.cuda_stream.synchronize()
+                cuda.memcpy_dtoh(output, d_output)
+            finally:
+                d_input.free()
+                d_output.free()
             
-            # Execute
-            context.execute_async_v3(stream_handle=self.cuda_stream.handle)
-            self.cuda_stream.synchronize()
-            
-            # Copy output
-            cuda.memcpy_dtoh(output, d_output)
+            embeddings = torch.from_numpy(output).to(self.device)
+            embeddings = nn.functional.normalize(embeddings, p=2, dim=1)
+            return embeddings
             
         finally:
-            d_input.free()
-            d_output.free()
-        
-        embeddings = torch.from_numpy(output).to(self.device)
-        embeddings = nn.functional.normalize(embeddings, p=2, dim=1)
-        
-        return embeddings
-    
+            # FIX: Pop context
+            if hasattr(self, 'cuda_ctx'):
+                self.cuda_ctx.pop()
+                
+    def __del__(self):
+        """Cleanup CUDA context"""
+        if hasattr(self, 'cuda_ctx'):
+            try:
+                self.cuda_ctx.detach()
+            except:
+                pass
+            
     def extract_features_from_frame(self,
                                    image: np.ndarray,
                                    bboxes: List[np.ndarray]) -> Tuple[np.ndarray, List[bool]]:
