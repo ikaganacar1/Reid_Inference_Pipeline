@@ -18,4 +18,4 @@ PYTHONPATH="$SCRIPT_DIR/.." python /home/ika/yzlm/Reid_Inference_Pipeline/reid_p
   --match-thresh 0.5 \
   --new-thresh 0.7 \
   --tensorrt \
-  --display-scale 0.2
+  --display-scale 0.4
