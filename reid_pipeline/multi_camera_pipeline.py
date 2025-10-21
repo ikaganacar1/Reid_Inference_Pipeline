@@ -1,6 +1,7 @@
 """
 Multi-Camera ReID Pipeline with Shared Gallery - FIXED VERSION
 Single detection thread to avoid CUDA conflicts
+FIXES: Video corruption and display scaling issues
 """
 import cv2
 import time
@@ -48,9 +49,11 @@ class MultiCameraReIDPipeline:
                  reid_batch_size: int = 16,
                  use_tensorrt: bool = False,
                  tensorrt_precision: str = 'fp16',
+                 display_scale: float = 0.5,  # NEW: Scale factor for display
                  logger: Optional[logging.Logger] = None):
         
         self.logger = logger or self._setup_logger()
+        self.display_scale = display_scale  # NEW: Store display scale
         
         # Shared detector (used in single thread, no lock needed)
         self.detector = EnhancedObjectDetector(
@@ -92,7 +95,8 @@ class MultiCameraReIDPipeline:
         self.stats = {
             'frames_processed': [0, 0, 0, 0],
             'total_detections': 0,
-            'total_persons_tracked': 0
+            'total_persons_tracked': 0,
+            'frames_written': 0  # NEW: Track frames written
         }
         
         self.logger.info("Multi-camera pipeline initialized with shared gallery")
@@ -161,7 +165,7 @@ class MultiCameraReIDPipeline:
                     continue  # Skip inactive cameras
                 
                 try:
-                    packet = self.frame_queues[cam_id].get(timeout=0.01)  # Increased timeout
+                    packet = self.frame_queues[cam_id].get(timeout=0.01)
                     
                     if packet is None:
                         active_cameras[cam_id] = False
@@ -202,18 +206,17 @@ class MultiCameraReIDPipeline:
                                         new_id = self.gallery_manager.next_person_id
                                         det.track_id = new_id
                                         success = self.gallery_manager.add_to_gallery(
-                                            new_id, embeddings[i], det.confidence,
-                                            packet.frame_id, det.bbox
+                                            person_id=new_id,
+                                            embedding=embeddings[i],
+                                            confidence=det.confidence,
+                                            frame_id=packet.frame_id,
+                                            bbox=det.bbox
                                         )
                                         if success:
                                             self.stats['total_persons_tracked'] += 1
-                                
-                                self.gallery_manager.update_frame()
-                        
-                        detections = valid_detections
                     
-                    # Create output packet
-                    out_packet = DetectionPacket(
+                    # Put into output queue
+                    output_packet = DetectionPacket(
                         camera_id=cam_id,
                         frame_id=packet.frame_id,
                         frame=packet.frame,
@@ -221,43 +224,48 @@ class MultiCameraReIDPipeline:
                         timestamp=time.time()
                     )
                     
-                    self.stats['frames_processed'][cam_id] += 1
-                    
                     try:
-                        self.output_queues[cam_id].put(out_packet, block=False)
+                        self.output_queues[cam_id].put(output_packet, block=False)
                     except queue.Full:
                         pass
                     
+                    self.stats['frames_processed'][cam_id] += 1
+                    
                 except queue.Empty:
-                    continue  # No frame available from this camera right now
-        
-        # Send stop signal to all cameras that haven't finished yet
-        for cam_id in range(4):
-            if active_cameras[cam_id]:
-                self.output_queues[cam_id].put(None)
+                    pass
         
         self.logger.info("Processing thread: Stopped")
     
     def _draw_detections(self, frame: np.ndarray, detections: List[Detection], camera_id: int):
-        """Draw detections on frame"""
+        """Draw bounding boxes and labels"""
         annotated = frame.copy()
         
         for det in detections:
+            x1, y1, x2, y2 = map(int, det.bbox)
+            
+            # Get color based on track ID
             if det.track_id is not None:
-                x1, y1, x2, y2 = det.bbox.astype(int)
                 color = self._get_color_for_id(det.track_id)
-                
-                cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
-                label = f"ID:{det.track_id}"
-                
-                cv2.rectangle(annotated, (x1, y1-20), (x1+80, y1), color, -1)
-                cv2.putText(annotated, label, (x1+2, y1-5),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                label = f"ID:{det.track_id} ({det.confidence:.2f})"
+            else:
+                color = (128, 128, 128)
+                label = f"Untracked ({det.confidence:.2f})"
+            
+            # Draw box
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+            
+            # Draw label background
+            (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            cv2.rectangle(annotated, (x1, y1 - h - 5), (x1 + w, y1), color, -1)
+            
+            # Draw label text
+            cv2.putText(annotated, label, (x1, y1 - 5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         # Camera label
-        cv2.rectangle(annotated, (5, 5), (120, 30), (0, 0, 0), -1)
-        cv2.putText(annotated, f"Camera {camera_id+1}", (10, 22),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.rectangle(annotated, (0, 0), (150, 40), (0, 0, 0), -1)
+        cv2.putText(annotated, f"Camera {camera_id + 1}", (10, 25),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
         return annotated
     
@@ -271,20 +279,23 @@ class MultiCameraReIDPipeline:
         return colors[track_id % len(colors)]
     
     def _display_thread(self, output_path: Optional[str] = None):
-        """Display and save 2x2 grid"""
+        """Display and save 2x2 grid - FIXED VERSION"""
         self.logger.info("Display thread: Started")
         
         out = None
-        last_frames = [None] * 4  # Keep last frame from each camera
+        last_frames = [None] * 4
         cameras_finished = [False] * 4
         
+        # FPS calculation for output video
+        frame_times = []
+        
         while self.running:
+            loop_start = time.time()
             frames = []
             all_finished = True
             
             for cam_id in range(4):
                 if cameras_finished[cam_id]:
-                    # Use last frame from this camera
                     frames.append(last_frames[cam_id])
                     continue
                 
@@ -296,47 +307,113 @@ class MultiCameraReIDPipeline:
                     if packet is None:
                         cameras_finished[cam_id] = True
                         self.logger.info(f"Display: Camera {cam_id} finished")
-                        frames.append(last_frames[cam_id])  # Use last frame
+                        frames.append(last_frames[cam_id])
                         continue
                     
                     annotated = self._draw_detections(packet.frame, packet.detections, cam_id)
                     frames.append(annotated)
-                    last_frames[cam_id] = annotated  # Save last frame
+                    last_frames[cam_id] = annotated
                     
                 except queue.Empty:
-                    # No new frame, use last frame
                     frames.append(last_frames[cam_id])
             
-            # Exit when all cameras finished
             if all_finished:
                 self.logger.info("Display: All cameras finished")
                 break
             
-            grid_frame = self._create_grid(frames)
+            # Create grid WITHOUT scaling for recording
+            grid_frame_full = self._create_grid(frames)
             
+            # Add statistics overlay
             with self.gallery_lock:
                 gallery_stats = self.gallery_manager.get_statistics()
             
-            cv2.rectangle(grid_frame, (10, 10), (300, 80), (0, 0, 0), -1)
-            cv2.putText(grid_frame, f"Gallery: {gallery_stats['gallery_size']}", (20, 35),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(grid_frame, f"Total Persons: {self.stats['total_persons_tracked']}", (20, 60),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.rectangle(grid_frame_full, (10, 10), (350, 110), (0, 0, 0), -1)
+            cv2.putText(grid_frame_full, f"Gallery: {gallery_stats['gallery_size']}", (20, 40),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            cv2.putText(grid_frame_full, f"Total Persons: {self.stats['total_persons_tracked']}", (20, 75),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             
+            # Write to output video (full resolution)
             if output_path:
                 if out is None:
-                    h, w = grid_frame.shape[:2]
-                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                    out = cv2.VideoWriter(output_path, fourcc, 30, (w, h))
-                out.write(grid_frame)
+                    h, w = grid_frame_full.shape[:2]
+                    estimated_fps = 10.0  # Start conservative
+                    
+                    # Based on codec test: MP4 codecs don't work, but AVI with XVID does!
+                    # Try AVI format first since we know it works
+                    base_path = output_path.replace('.mp4', '').replace('.avi', '')
+                    
+                    # Try AVI with XVID first (we know this works from your test)
+                    try:
+                        avi_path = base_path + '.avi'
+                        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                        out = cv2.VideoWriter(avi_path, fourcc, estimated_fps, (w, h))
+                        if out.isOpened():
+                            self.logger.info(f"✅ Video writer initialized (AVI/XVID): {w}x{h} @ {estimated_fps} FPS")
+                            self.logger.info(f"   Output file: {avi_path}")
+                        else:
+                            out = None
+                    except Exception as e:
+                        self.logger.error(f"AVI format failed: {e}")
+                        out = None
+                    
+                    # If AVI didn't work, try MP4 codecs as fallback
+                    if out is None:
+                        mp4_path = base_path + '.mp4'
+                        codecs_to_try = [
+                            ('mp4v', 'MPEG-4'),
+                            ('MJPG', 'Motion JPEG'),
+                            ('XVID', 'XVID'),
+                        ]
+                        
+                        for codec_str, codec_name in codecs_to_try:
+                            try:
+                                fourcc = cv2.VideoWriter_fourcc(*codec_str)
+                                out = cv2.VideoWriter(mp4_path, fourcc, estimated_fps, (w, h))
+                                if out.isOpened():
+                                    self.logger.info(f"✅ Video writer initialized with {codec_name}: {w}x{h} @ {estimated_fps} FPS")
+                                    break
+                                else:
+                                    out = None
+                            except Exception as e:
+                                self.logger.debug(f"Codec {codec_name} failed: {e}")
+                                out = None
+                    
+                    if out is None:
+                        self.logger.error("❌ Complete video writer failure - no video will be saved!")
+                        self.logger.error("   All codecs failed. Check OpenCV installation.")
+                
+                if out is not None:
+                    success = out.write(grid_frame_full)
+                    if success:
+                        self.stats['frames_written'] += 1
+                        # Calculate actual FPS every 30 frames
+                        frame_times.append(time.time())
+                        if len(frame_times) > 30:
+                            frame_times.pop(0)
+                            if len(frame_times) >= 2:
+                                actual_fps = len(frame_times) / (frame_times[-1] - frame_times[0])
+                                if self.stats['frames_written'] % 100 == 0:
+                                    self.logger.info(f"Writing at ~{actual_fps:.1f} FPS, {self.stats['frames_written']} frames written")
             
-            cv2.imshow('Multi-Camera ReID (2x2 Grid)', grid_frame)
+            # Create scaled version for display
+            if self.display_scale != 1.0:
+                display_h = int(grid_frame_full.shape[0] * self.display_scale)
+                display_w = int(grid_frame_full.shape[1] * self.display_scale)
+                grid_frame_display = cv2.resize(grid_frame_full, (display_w, display_h))
+            else:
+                grid_frame_display = grid_frame_full
+            
+            # Show scaled display
+            cv2.imshow('Multi-Camera ReID (2x2 Grid)', grid_frame_display)
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 self.running = False
         
         if out:
             out.release()
+            self.logger.info(f"Video saved: {self.stats['frames_written']} frames written")
         cv2.destroyAllWindows()
         self.logger.info("Display thread: Stopped")
     
@@ -355,7 +432,7 @@ class MultiCameraReIDPipeline:
         resized = []
         for i, f in enumerate(frames):
             if f is None:
-                # Create black frame with "Finished" or "Waiting" label
+                # Create black frame with "Waiting" label
                 black = np.zeros((target_h, target_w, 3), dtype=np.uint8)
                 cv2.putText(black, f"Camera {i+1}", (target_w//2-80, target_h//2-20),
                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (100, 100, 100), 2)
@@ -383,6 +460,7 @@ class MultiCameraReIDPipeline:
         self.logger.info("Starting Multi-Camera ReID Pipeline")
         self.logger.info(f"Videos: {video_paths}")
         self.logger.info(f"Output: {output_path}")
+        self.logger.info(f"Display scale: {self.display_scale}")
         self.logger.info("="*60)
         
         self.running = True
@@ -430,6 +508,7 @@ class MultiCameraReIDPipeline:
         with self.gallery_lock:
             gallery_size = self.gallery_manager.get_statistics()['gallery_size']
         self.logger.info(f"Gallery size: {gallery_size}")
+        self.logger.info(f"Frames written to video: {self.stats['frames_written']}")
         self.logger.info("="*60)
 
 
@@ -446,6 +525,7 @@ if __name__ == "__main__":
     parser.add_argument('--match-thresh', type=float, default=0.5, help='Match threshold')
     parser.add_argument('--new-thresh', type=float, default=0.7, help='New person threshold')
     parser.add_argument('--tensorrt', action='store_true', help='Use TensorRT')
+    parser.add_argument('--display-scale', type=float, default=0.5, help='Display window scale (default: 0.5)')
     
     args = parser.parse_args()
     
@@ -459,7 +539,8 @@ if __name__ == "__main__":
         gallery_max_size=1000,
         reid_batch_size=16,
         use_tensorrt=args.tensorrt,
-        tensorrt_precision='fp16'
+        tensorrt_precision='fp16',
+        display_scale=args.display_scale
     )
     
     pipeline.run(args.videos, args.output)
