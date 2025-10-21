@@ -452,6 +452,15 @@ if __name__ == "__main__":
     
     converter = TensorRTConverter()
     
+    # ! CONVERT WİTH TAO EXPORT
+    # $ tao model re_identification export   -e /home/ika/yzlm/TwinProject/ReID_Experiments/LTCC_ReID/ltcc_gemini.yaml   export.checkpoint=/home/ika/yzlm/Reid_Inference_Pipeline/test_the_pipeline/reid_ltcc.pth   export.onnx_file=/home/ika/Desktop/reid_ltcc.onnx
+    """converter.pytorch_to_onnx(
+        model=Path("/home/ika/yzlm/Reid_Inference_Pipeline/test_the_pipeline/reid_ltcc.ltcc"),
+        output_path=Path("/home/ika/yzlm/Reid_Inference_Pipeline/test_the_pipeline/reid_ltcc.onnx"),
+        input_shape=(3, 256, 128)
+
+    )"""
+    
     converter.onnx_to_tensorrt(
             onnx_path=Path("/home/ika/yzlm/Reid_Inference_Pipeline/test_the_pipeline/reid_ltcc.onnx"),
             engine_path=Path("/home/ika/yzlm/Reid_Inference_Pipeline/test_the_pipeline/reid_ltcc.engine")
