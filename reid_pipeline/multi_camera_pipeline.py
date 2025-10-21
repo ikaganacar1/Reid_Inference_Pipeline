@@ -286,6 +286,7 @@ class MultiCameraReIDPipeline:
         last_frames = [None] * 4
         cameras_finished = [False] * 4
         writer_dimensions = None  # Store writer dimensions once initialized
+        initialized_with_all_real_frames = False  # Flag to ensure we init with real frames
         
         # FPS calculation for output video
         frame_times = []
@@ -329,6 +330,11 @@ class MultiCameraReIDPipeline:
             if grid_frame_full is None:
                 continue  # Skip this iteration if no valid grid yet
             
+            # Track frame timing for FPS calculation (even before writer init)
+            frame_times.append(time.time())
+            if len(frame_times) > 30:
+                frame_times.pop(0)
+            
             # Add statistics overlay
             with self.gallery_lock:
                 gallery_stats = self.gallery_manager.get_statistics()
@@ -342,11 +348,31 @@ class MultiCameraReIDPipeline:
             # Write to output video (full resolution)
             if output_path:
                 if out is None:
+                    # Check if all cameras have provided real frames (not just placeholders)
+                    all_cameras_active = all(f is not None for f in last_frames)
+                    
+                    if not all_cameras_active or not initialized_with_all_real_frames:
+                        # Wait for all cameras to have real frames before initializing writer
+                        if all_cameras_active:
+                            self.logger.info("⏳ All cameras active - initializing video writer with real frame dimensions...")
+                            initialized_with_all_real_frames = True
+                        else:
+                            # Skip this iteration - wait for all cameras
+                            continue
+                    
                     # Get ACTUAL dimensions from the CURRENT grid frame
                     h, w = grid_frame_full.shape[:2]
-                    estimated_fps = 10.0  # Start conservative
                     
-                    self.logger.info(f"📐 Current grid frame dimensions: {w}x{h}")
+                    # Calculate FPS based on actual processing time or use conservative value
+                    if len(frame_times) >= 10:
+                        # Calculate actual FPS from recent frames
+                        actual_fps = len(frame_times) / (frame_times[-1] - frame_times[0])
+                        estimated_fps = min(30.0, max(10.0, actual_fps))  # Clamp between 10-30
+                    else:
+                        estimated_fps = 25.0  # Start with 25 FPS (common video standard)
+                    
+                    self.logger.info(f"📐 Final grid frame dimensions: {w}x{h}")
+                    self.logger.info(f"🎬 Using FPS: {estimated_fps:.1f}")
                     
                     # Based on codec test: MP4 codecs don't work, but AVI with XVID does!
                     # Try AVI format first since we know it works
@@ -359,7 +385,7 @@ class MultiCameraReIDPipeline:
                         out = cv2.VideoWriter(avi_path, fourcc, estimated_fps, (w, h))
                         if out.isOpened():
                             writer_dimensions = (w, h)  # Store dimensions ourselves!
-                            self.logger.info(f"✅ Video writer initialized (AVI/XVID): {w}x{h} @ {estimated_fps} FPS")
+                            self.logger.info(f"✅ Video writer initialized (AVI/XVID): {w}x{h} @ {estimated_fps:.1f} FPS")
                             self.logger.info(f"   Output file: {avi_path}")
                         else:
                             out = None
@@ -393,31 +419,47 @@ class MultiCameraReIDPipeline:
                     if out is None:
                         self.logger.error("❌ Complete video writer failure - no video will be saved!")
                         self.logger.error("   All codecs failed. Check OpenCV installation.")
+                        # Continue without saving video
+                        continue
                 
-                if out is not None and writer_dimensions is not None:
-                    # CRITICAL: Verify frame dimensions match before writing
-                    frame_h, frame_w = grid_frame_full.shape[:2]
-                    writer_w, writer_h = writer_dimensions  # Use stored dimensions!
-                    
-                    if frame_w != writer_w or frame_h != writer_h:
-                        self.logger.error(f"❌ DIMENSION MISMATCH! Frame={frame_w}x{frame_h}, Writer expects={writer_w}x{writer_h}")
-                        self.logger.error("   Resizing frame to match writer...")
-                        grid_frame_full = cv2.resize(grid_frame_full, (writer_w, writer_h))
-                    
-                    success = out.write(grid_frame_full)
-                    if success:
-                        self.stats['frames_written'] += 1
-                        # Calculate actual FPS every 30 frames
-                        frame_times.append(time.time())
-                        if len(frame_times) > 30:
-                            frame_times.pop(0)
-                            if len(frame_times) >= 2:
-                                actual_fps = len(frame_times) / (frame_times[-1] - frame_times[0])
-                                if self.stats['frames_written'] % 100 == 0:
-                                    self.logger.info(f"Writing at ~{actual_fps:.1f} FPS, {self.stats['frames_written']} frames written")
-                    else:
-                        if self.stats['frames_written'] == 0:
-                            self.logger.error(f"❌ First frame write failed! Frame dimensions: {frame_w}x{frame_h}, Channels: {grid_frame_full.shape[2] if len(grid_frame_full.shape) == 3 else 1}")
+                # If writer still not initialized (waiting for all cameras), skip writing
+                if out is None or writer_dimensions is None:
+                    continue
+                
+                # Write frame to video
+                # At this point, we know out and writer_dimensions are not None
+                frame_h, frame_w = grid_frame_full.shape[:2]
+                writer_w, writer_h = writer_dimensions
+                
+                if frame_w != writer_w or frame_h != writer_h:
+                    self.logger.warning(f"⚠️  Frame size changed: {frame_w}x{frame_h} → {writer_w}x{writer_h}")
+                    self.logger.warning("   Resizing to match initial size...")
+                    grid_frame_full = cv2.resize(grid_frame_full, (writer_w, writer_h), interpolation=cv2.INTER_LINEAR)
+                
+                # Ensure frame is in correct format (BGR, 3 channels)
+                if len(grid_frame_full.shape) != 3 or grid_frame_full.shape[2] != 3:
+                    self.logger.error(f"❌ Invalid frame format: shape={grid_frame_full.shape}")
+                    continue
+                
+                # Ensure frame is uint8
+                if grid_frame_full.dtype != np.uint8:
+                    grid_frame_full = grid_frame_full.astype(np.uint8)
+                
+                # Ensure frame is contiguous in memory
+                if not grid_frame_full.flags['C_CONTIGUOUS']:
+                    grid_frame_full = np.ascontiguousarray(grid_frame_full)
+                
+                success = out.write(grid_frame_full)
+                if success:
+                    self.stats['frames_written'] += 1
+                    # Log progress every 100 frames
+                    if len(frame_times) >= 2 and self.stats['frames_written'] % 100 == 0:
+                        actual_fps = len(frame_times) / (frame_times[-1] - frame_times[0])
+                        self.logger.info(f"✍️  Writing at ~{actual_fps:.1f} FPS, {self.stats['frames_written']} frames written")
+                else:
+                    if self.stats['frames_written'] < 5:  # Log first few failures
+                        self.logger.error(f"❌ Frame write failed! Frames written so far: {self.stats['frames_written']}")
+                        self.logger.error(f"   Frame: {frame_w}x{frame_h}, dtype={grid_frame_full.dtype}, shape={grid_frame_full.shape}")
             
             # Create scaled version for display
             if self.display_scale != 1.0:
