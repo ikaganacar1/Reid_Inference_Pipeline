@@ -408,19 +408,7 @@ async def list_jobs(limit: int = 20, offset: int = 0):
 async def get_job(job_id: str):
     """Get job status and details"""
     try:
-        # Try Redis first for real-time status
-        if redis_client:
-            job_data = redis_client.hgetall(f"job:{job_id}")
-            if job_data:
-                return {
-                    "success": True,
-                    "job_id": job_id,
-                    "status": job_data.get("status", "unknown"),
-                    "progress": float(job_data.get("progress", 0.0)),
-                    "stats": json.loads(job_data.get("stats", "{}"))
-                }
-
-        # Fall back to database
+        # Always get data from database for complete information
         conn = get_db_connection()
         if not conn:
             raise HTTPException(status_code=500, detail="Database connection failed")
@@ -433,6 +421,16 @@ async def get_job(job_id: str):
 
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
+
+        # Optionally merge with Redis real-time data if available
+        if redis_client:
+            job_data = redis_client.hgetall(f"job:{job_id}")
+            if job_data:
+                # Update with real-time Redis data
+                job['status'] = job_data.get("status", job.get('status'))
+                job['progress'] = float(job_data.get("progress", job.get('progress', 0.0)))
+                if job_data.get("stats"):
+                    job['stats'] = json.loads(job_data.get("stats"))
 
         return {
             "success": True,
@@ -496,9 +494,22 @@ async def get_output_video(job_id: str):
         if not output_path.exists():
             raise HTTPException(status_code=404, detail="Output file not found on disk")
 
+        # Detect MIME type based on file extension
+        file_extension = output_path.suffix.lower()
+        mime_types = {
+            '.mp4': 'video/mp4',
+            '.avi': 'video/x-msvideo',
+            '.mkv': 'video/x-matroska',
+            '.mov': 'video/quicktime',
+            '.webm': 'video/webm'
+        }
+        media_type = mime_types.get(file_extension, 'video/mp4')
+
+        logger.info(f"Serving video: {output_path} (type: {media_type}, size: {output_path.stat().st_size} bytes)")
+
         return FileResponse(
             output_path,
-            media_type="video/mp4",
+            media_type=media_type,
             filename=output_path.name
         )
 
@@ -560,6 +571,102 @@ async def save_config(name: str, config: PipelineConfig):
 
     except Exception as e:
         logger.error(f"Error saving config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/configs/{config_id}")
+async def get_config(config_id: int):
+    """Get a specific configuration by ID"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM pipeline_configs WHERE config_id = %s", (config_id,))
+        config = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        if not config:
+            raise HTTPException(status_code=404, detail="Configuration not found")
+
+        return {
+            "success": True,
+            "config": config
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/configs/{config_id}")
+async def update_config(config_id: int, name: str, config: PipelineConfig):
+    """Update an existing configuration"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+
+        cursor = conn.cursor()
+        now = datetime.now()
+
+        cursor.execute("""
+            UPDATE pipeline_configs
+            SET name = %s, config = %s, updated_at = %s
+            WHERE config_id = %s
+        """, (name, json.dumps(config.dict()), now, config_id))
+
+        if cursor.rowcount == 0:
+            cursor.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail="Configuration not found")
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return {
+            "success": True,
+            "message": f"Configuration '{name}' updated successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/configs/{config_id}")
+async def delete_config(config_id: int):
+    """Delete a configuration"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM pipeline_configs WHERE config_id = %s", (config_id,))
+
+        if cursor.rowcount == 0:
+            cursor.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail="Configuration not found")
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return {
+            "success": True,
+            "message": "Configuration deleted successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting config: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.websocket("/ws")

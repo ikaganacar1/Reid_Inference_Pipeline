@@ -228,12 +228,21 @@ class PipelineWorker:
             update_progress()
 
             # Get final statistics
+            gallery_stats = pipeline.gallery_manager.get_statistics()
             final_stats = {
                 'frames_captured': pipeline.stats['frames_captured'],
                 'frames_processed': pipeline.stats['frames_processed'],
                 'total_detections': pipeline.stats['total_detections'],
-                'total_persons_tracked': pipeline.stats['total_persons_tracked']
+                'total_persons_tracked': gallery_stats['gallery_size']  # Actual unique persons in gallery
             }
+
+            # Verify output file exists
+            if not output_path.exists():
+                logger.error(f"Output file does not exist: {output_path}")
+                raise FileNotFoundError(f"Output video not created: {output_path}")
+
+            output_size = output_path.stat().st_size
+            logger.info(f"Output video created: {output_path} (size: {output_size} bytes)")
 
             self.update_job_status(
                 job_id,
@@ -243,7 +252,7 @@ class PipelineWorker:
                 stats=final_stats
             )
 
-            logger.info(f"Job {job_id} completed successfully")
+            logger.info(f"Job {job_id} completed successfully with output: {output_path}")
 
         except Exception as e:
             logger.error(f"Error processing job {job_id}: {e}", exc_info=True)
@@ -311,11 +320,22 @@ class PipelineWorker:
             )
 
             # Final statistics
+            gallery_stats = pipeline.gallery_manager.get_statistics()
             final_stats = {
-                'total_persons_tracked': pipeline.stats['total_persons_tracked'],
+                'total_persons_tracked': gallery_stats['gallery_size'],  # Actual unique persons in gallery
                 'total_detections': pipeline.stats['total_detections'],
-                'frames_written': pipeline.stats.get('frames_written', 0)
+                'frames_written': pipeline.stats.get('frames_written', 0),
+                'frames_processed': pipeline.stats.get('frames_processed', 0),
+                'frames_captured': pipeline.stats.get('frames_captured', 0)
             }
+
+            # Verify output file exists
+            if not output_path.exists():
+                logger.error(f"Multi-camera output file does not exist: {output_path}")
+                raise FileNotFoundError(f"Output video not created: {output_path}")
+
+            output_size = output_path.stat().st_size
+            logger.info(f"Multi-camera output video created: {output_path} (size: {output_size} bytes)")
 
             self.update_job_status(
                 job_id,

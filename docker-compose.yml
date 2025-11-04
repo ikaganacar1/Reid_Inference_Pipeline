@@ -111,9 +111,7 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-    environment:
-      - REACT_APP_API_URL=http://localhost:8000
-      - REACT_APP_WS_URL=ws://localhost:8000
+    # No environment variables - nginx will proxy /api/ and /ws to the backend
 
 volumes:
   postgres_data:

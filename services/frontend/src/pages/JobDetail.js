@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import {
   Container,
   Paper,
@@ -14,11 +14,15 @@ import {
   TableCell,
   Button,
 } from '@mui/material';
-import { Download as DownloadIcon } from '@mui/icons-material';
+import {
+  Download as DownloadIcon,
+  Visibility as VisibilityIcon,
+} from '@mui/icons-material';
 import { apiService, wsService } from '../services/api';
 
 function JobDetail() {
   const { jobId } = useParams();
+  const navigate = useNavigate();
   const [job, setJob] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -105,13 +109,22 @@ function JobDetail() {
           Job Details
         </Typography>
         {job.status === 'completed' && job.output_video && (
-          <Button
-            variant="contained"
-            startIcon={<DownloadIcon />}
-            onClick={handleDownload}
-          >
-            Download Output
-          </Button>
+          <Box display="flex" gap={2}>
+            <Button
+              variant="contained"
+              startIcon={<VisibilityIcon />}
+              onClick={() => navigate(`/results/${jobId}`)}
+            >
+              View Results
+            </Button>
+            <Button
+              variant="outlined"
+              startIcon={<DownloadIcon />}
+              onClick={handleDownload}
+            >
+              Download Output
+            </Button>
+          </Box>
         )}
       </Box>
 

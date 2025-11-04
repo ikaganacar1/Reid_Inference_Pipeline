@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Container,
   Paper,
@@ -14,10 +14,13 @@ import {
   Alert,
   CircularProgress,
   LinearProgress,
+  Divider,
+  Chip,
 } from '@mui/material';
 import { useDropzone } from 'react-dropzone';
 import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
+import SettingsIcon from '@mui/icons-material/Settings';
 import { apiService } from '../services/api';
 import { useNavigate } from 'react-router-dom';
 
@@ -40,6 +43,55 @@ function SingleCameraPipeline() {
   });
   const [error, setError] = useState(null);
   const [starting, setStarting] = useState(false);
+  const [savedConfigs, setSavedConfigs] = useState([]);
+  const [selectedConfigId, setSelectedConfigId] = useState('');
+  const [loadingConfigs, setLoadingConfigs] = useState(false);
+
+  useEffect(() => {
+    loadSavedConfigs();
+  }, []);
+
+  const loadSavedConfigs = async () => {
+    setLoadingConfigs(true);
+    try {
+      const response = await apiService.listConfigs();
+      setSavedConfigs(response.data.configs || []);
+    } catch (err) {
+      console.error('Error loading configs:', err);
+    } finally {
+      setLoadingConfigs(false);
+    }
+  };
+
+  const handleLoadConfig = (event) => {
+    const configId = event.target.value;
+    setSelectedConfigId(configId);
+
+    if (!configId) {
+      // Reset to default
+      setConfig({
+        preset: 'development',
+        device: 'cuda',
+        yolo_model: 'yolo11n.pt',
+        reid_model: '',
+        detection_conf: 0.3,
+        reid_threshold_match: 0.70,
+        reid_threshold_new: 0.50,
+        gallery_max_size: 500,
+        reid_batch_size: 16,
+        use_tensorrt: false,
+      });
+      return;
+    }
+
+    const selectedConfig = savedConfigs.find((c) => c.config_id === configId);
+    if (selectedConfig) {
+      const parsedConfig = typeof selectedConfig.config === 'string'
+        ? JSON.parse(selectedConfig.config)
+        : selectedConfig.config;
+      setConfig(parsedConfig);
+    }
+  };
 
   const onDrop = async (acceptedFiles) => {
     if (acceptedFiles.length === 0) return;
@@ -165,6 +217,51 @@ function SingleCameraPipeline() {
       <Paper sx={{ p: 3, mb: 3 }}>
         <Typography variant="h6" gutterBottom>
           2. Configure Pipeline
+        </Typography>
+
+        {/* Load Saved Configuration */}
+        <Box sx={{ mb: 3 }}>
+          <FormControl fullWidth>
+            <InputLabel>Load Saved Configuration</InputLabel>
+            <Select
+              value={selectedConfigId}
+              label="Load Saved Configuration"
+              onChange={handleLoadConfig}
+              startAdornment={<SettingsIcon sx={{ mr: 1, color: 'text.secondary' }} />}
+            >
+              <MenuItem value="">
+                <em>Manual Configuration</em>
+              </MenuItem>
+              {savedConfigs.map((savedConfig) => (
+                <MenuItem key={savedConfig.config_id} value={savedConfig.config_id}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
+                    <Typography>{savedConfig.name}</Typography>
+                    <Box sx={{ flexGrow: 1 }} />
+                    <Chip
+                      label={
+                        typeof savedConfig.config === 'string'
+                          ? JSON.parse(savedConfig.config).preset || 'N/A'
+                          : savedConfig.config.preset || 'N/A'
+                      }
+                      size="small"
+                      color="primary"
+                    />
+                  </Box>
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          {selectedConfigId && (
+            <Alert severity="info" sx={{ mt: 2 }}>
+              Configuration loaded. You can still modify the values below.
+            </Alert>
+          )}
+        </Box>
+
+        <Divider sx={{ my: 2 }} />
+
+        <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+          Pipeline Settings
         </Typography>
 
         <Grid container spacing={2}>

@@ -20,6 +20,7 @@ import {
   Visibility as VisibilityIcon,
   Delete as DeleteIcon,
   Download as DownloadIcon,
+  VideoLibrary as VideoLibraryIcon,
 } from '@mui/icons-material';
 import { apiService, wsService } from '../services/api';
 
@@ -181,12 +182,23 @@ function JobsList() {
                         <VisibilityIcon />
                       </IconButton>
                     </Tooltip>
-                    {job.status === 'completed' && (
-                      <Tooltip title="Download Output">
-                        <IconButton size="small" onClick={() => handleDownload(job.job_id)}>
-                          <DownloadIcon />
-                        </IconButton>
-                      </Tooltip>
+                    {job.status === 'completed' && job.output_video && (
+                      <>
+                        <Tooltip title="View Results">
+                          <IconButton
+                            size="small"
+                            onClick={() => navigate(`/results/${job.job_id}`)}
+                            color="primary"
+                          >
+                            <VideoLibraryIcon />
+                          </IconButton>
+                        </Tooltip>
+                        <Tooltip title="Download Output">
+                          <IconButton size="small" onClick={() => handleDownload(job.job_id)}>
+                            <DownloadIcon />
+                          </IconButton>
+                        </Tooltip>
+                      </>
                     )}
                     {job.status === 'running' && (
                       <Tooltip title="Cancel Job">

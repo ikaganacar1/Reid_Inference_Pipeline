@@ -405,6 +405,8 @@ class ProductionReIDPipeline:
         out = None
         if output_path:
             # Will be initialized on first frame
+            # Use mp4v codec (OpenCV default that always works)
+            # We'll convert to H.264 using FFmpeg after pipeline completes
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         
         try:
@@ -536,23 +538,91 @@ class ProductionReIDPipeline:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             y_offset += 20
     
+    def _convert_to_h264(self, input_path: str) -> bool:
+        """
+        Convert video to H.264 codec using FFmpeg for browser compatibility.
+
+        Args:
+            input_path: Path to input video with mp4v codec
+
+        Returns:
+            True if conversion successful, False otherwise
+        """
+        import subprocess
+        from pathlib import Path
+
+        input_file = Path(input_path)
+        if not input_file.exists():
+            self.logger.error(f"Input file not found: {input_path}")
+            return False
+
+        # Create temporary output path
+        temp_output = input_file.parent / f"{input_file.stem}_h264.mp4"
+
+        try:
+            self.logger.info(f"Converting video to H.264 for browser compatibility...")
+
+            # FFmpeg command to re-encode with H.264
+            cmd = [
+                'ffmpeg',
+                '-i', str(input_file),
+                '-c:v', 'libx264',  # H.264 video codec
+                '-preset', 'fast',  # Encoding speed
+                '-crf', '23',  # Quality (18-28, lower = better quality)
+                '-c:a', 'copy',  # Copy audio stream if exists
+                '-movflags', '+faststart',  # Enable streaming
+                '-y',  # Overwrite output file
+                str(temp_output)
+            ]
+
+            # Run FFmpeg
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=300  # 5 minute timeout
+            )
+
+            if result.returncode == 0 and temp_output.exists():
+                # Replace original with H.264 version
+                temp_output.replace(input_file)
+                self.logger.info(f"✅ Video converted to H.264 successfully: {input_file}")
+                return True
+            else:
+                self.logger.error(f"FFmpeg conversion failed: {result.stderr.decode()}")
+                return False
+
+        except subprocess.TimeoutExpired:
+            self.logger.error("FFmpeg conversion timed out")
+            return False
+        except Exception as e:
+            self.logger.error(f"Error during video conversion: {e}", exc_info=True)
+            return False
+        finally:
+            # Clean up temp file if it exists
+            if temp_output.exists() and temp_output != input_file:
+                try:
+                    temp_output.unlink()
+                except:
+                    pass
+
     def run(self, video_source, output_path: Optional[str] = None):
         """
         Run the pipeline.
-        
+
         Args:
             video_source: Video file path or camera index
             output_path: Output video path (optional)
         """
         self.logger.info(f"Starting pipeline: source={video_source}")
-        
+
         self.running = True
         self.start_time = time.time()
-        
+
         # Warm up models
         self.logger.info("Warming up models...")
         self.reid_extractor.warmup(num_iterations=5)
-        
+
         # Start threads
         self.threads = [
             threading.Thread(target=self._capture_thread, args=(video_source,), daemon=True),
@@ -560,10 +630,10 @@ class ProductionReIDPipeline:
             threading.Thread(target=self._reid_tracking_thread, daemon=True),
             threading.Thread(target=self._display_thread, args=(output_path,), daemon=True)
         ]
-        
+
         for thread in self.threads:
             thread.start()
-        
+
         try:
             # Wait for threads to finish (or for interrupt)
             for thread in self.threads:
@@ -578,13 +648,17 @@ class ProductionReIDPipeline:
         finally:
             # Cleanup
             self.logger.info("Shutting down pipeline and cleaning up resources...")
-            
+
             # Explicitly clean up CUDA context from ReID extractor
             if self.reid_extractor.inference_mode == 'tensorrt':
                 self.reid_extractor.cleanup()
-                
+
             self.logger.info("Pipeline stopped")
             self._print_summary()
+
+            # Convert video to H.264 for browser compatibility
+            if output_path:
+                self._convert_to_h264(output_path)
     
     def stop(self):
         """Stop the pipeline"""
