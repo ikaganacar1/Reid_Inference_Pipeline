@@ -1,0 +1,124 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: reid_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: reid_pipeline
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for job queue
+  redis:
+    image: redis:7-alpine
+    container_name: reid_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # FastAPI Backend
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: reid_api
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=reid_pipeline
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - UPLOAD_DIR=/app/uploads
+      - OUTPUT_DIR=/app/outputs
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ./services/api:/app  # For development hot-reload
+    ports:
+      - "8888:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Pipeline Worker (requires NVIDIA GPU)
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    container_name: reid_worker
+    runtime: nvidia  # Requires nvidia-docker
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=reid_pipeline
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - OUTPUT_DIR=/app/outputs
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - CUDA_LAUNCH_BLOCKING=1
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ./reid_pipeline:/app/reid_pipeline  # Mount pipeline code
+      - ./models:/app/models  # Mount model files
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # React Frontend
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: reid_frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+      - REACT_APP_WS_URL=ws://localhost:8000
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  default:
+    name: reid_network

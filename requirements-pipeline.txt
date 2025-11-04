@@ -1,0 +1,15 @@
+# Core ML/CV dependencies
+opencv-python==4.8.1.78
+numpy==1.24.3
+Pillow==10.1.0
+
+# Deep Learning
+ultralytics
+
+# ReID Pipeline dependencies
+redis==5.0.1
+psycopg2-binary==2.9.9
+pyyaml==6.0.1
+
+# Optional: TensorRT (install separately on Jetson)
+# pycuda==2022.2.2

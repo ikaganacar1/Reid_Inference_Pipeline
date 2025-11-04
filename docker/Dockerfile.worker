@@ -1,0 +1,40 @@
+FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04
+
+WORKDIR /app
+
+# Install Python and system dependencies
+RUN apt-get update && apt-get install -y \
+    python3.10 \
+    python3-pip \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Upgrade pip
+RUN pip3 install --no-cache-dir --upgrade pip
+
+# Install PyTorch with CUDA 12.8 support for RTX 5070 (compute capability 12.0)
+RUN pip3 install --no-cache-dir \
+    torch==2.7.0 \
+    torchvision==0.22.0 \
+    --index-url https://download.pytorch.org/whl/cu128
+
+# Install pipeline dependencies
+COPY requirements-pipeline.txt .
+RUN pip3 install --no-cache-dir -r requirements-pipeline.txt
+
+# Copy entire project
+COPY . /app/
+
+# Create directories
+RUN mkdir -p /app/uploads /app/outputs
+
+# Set Python path
+ENV PYTHONPATH=/app
+
+CMD ["python3", "/app/services/pipeline_worker/worker.py"]

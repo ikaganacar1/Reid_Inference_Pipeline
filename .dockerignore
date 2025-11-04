@@ -7,6 +7,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Virtual environments
 venv/
 env/
 ENV/
@@ -17,41 +19,32 @@ ENV/
 *.swp
 *.swo
 
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+docs/
+
+# Test files
+tests/
+test_*/
+*_test.py
+
 # Outputs
 outputs/
 uploads/
 *.mp4
 *.avi
-*.mov
-*.mkv
 *.pkl
-
-# Models
-*.pt
-*.pth
-*.engine
-*.onnx
-
 
 # Node
 node_modules/
 npm-debug.log
 yarn-error.log
-services/frontend/build/
 
-# Docker volumes
-postgres_data/
-redis_data/
-
-# Environment
-.env
-.env.local
-
-# Logs
-*.log
-
-# OS
-.DS_Store
-Thumbs.db
-
-*.md
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore

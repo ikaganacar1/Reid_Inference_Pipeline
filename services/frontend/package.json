@@ -1,0 +1,45 @@
+{
+  "name": "reid-pipeline-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.20.0",
+    "axios": "^1.6.2",
+    "react-dropzone": "^14.2.3",
+    "@mui/material": "^5.14.20",
+    "@mui/icons-material": "^5.14.19",
+    "@emotion/react": "^11.11.1",
+    "@emotion/styled": "^11.11.0",
+    "recharts": "^2.10.3",
+    "react-player": "^2.13.0"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  },
+  "eslintConfig": {
+    "extends": [
+      "react-app"
+    ]
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  },
+  "devDependencies": {
+    "react-scripts": "5.0.1"
+  },
+  "proxy": "http://api:8000"
+}
