@@ -378,44 +378,46 @@ class MultiCameraReIDPipeline:
                     # Try AVI format first since we know it works
                     base_path = output_path.replace('.mp4', '').replace('.avi', '')
                     
-                    # Try AVI with XVID first (we know this works from your test)
-                    try:
-                        avi_path = base_path + '.avi'
-                        fourcc = cv2.VideoWriter_fourcc(*'XVID')
-                        out = cv2.VideoWriter(avi_path, fourcc, estimated_fps, (w, h))
-                        if out.isOpened():
-                            writer_dimensions = (w, h)  # Store dimensions ourselves!
-                            self.logger.info(f"✅ Video writer initialized (AVI/XVID): {w}x{h} @ {estimated_fps:.1f} FPS")
-                            self.logger.info(f"   Output file: {avi_path}")
-                        else:
-                            out = None
-                    except Exception as e:
-                        self.logger.error(f"AVI format failed: {e}")
-                        out = None
-                    
-                    # If AVI didn't work, try MP4 codecs as fallback
-                    if out is None:
-                        mp4_path = base_path + '.mp4'
-                        codecs_to_try = [
-                            ('mp4v', 'MPEG-4'),
-                            ('MJPG', 'Motion JPEG'),
-                            ('XVID', 'XVID'),
-                        ]
-                        
-                        for codec_str, codec_name in codecs_to_try:
-                            try:
-                                fourcc = cv2.VideoWriter_fourcc(*codec_str)
-                                out = cv2.VideoWriter(mp4_path, fourcc, estimated_fps, (w, h))
-                                if out.isOpened():
-                                    writer_dimensions = (w, h)  # Store dimensions!
-                                    self.logger.info(f"✅ Video writer initialized with {codec_name}: {w}x{h} @ {estimated_fps} FPS")
-                                    break
-                                else:
-                                    out = None
-                            except Exception as e:
-                                self.logger.debug(f"Codec {codec_name} failed: {e}")
+                    # Try MP4 with H.264 first for best browser compatibility
+                    mp4_path = base_path + '.mp4'
+                    codecs_to_try = [
+                        ('avc1', 'H.264 (avc1)'),  # Best browser support
+                        ('H264', 'H.264 (H264)'),  # Alternative H.264
+                        ('X264', 'H.264 (X264)'),  # Linux H.264
+                        ('mp4v', 'MPEG-4'),        # Fallback (poor browser support)
+                    ]
+
+                    for codec_str, codec_name in codecs_to_try:
+                        try:
+                            fourcc = cv2.VideoWriter_fourcc(*codec_str)
+                            out = cv2.VideoWriter(mp4_path, fourcc, estimated_fps, (w, h))
+                            if out.isOpened():
+                                writer_dimensions = (w, h)  # Store dimensions!
+                                self.logger.info(f"✅ Video writer initialized with {codec_name}: {w}x{h} @ {estimated_fps} FPS")
+                                self.logger.info(f"   Output file: {mp4_path}")
+                                break
+                            else:
                                 out = None
-                    
+                        except Exception as e:
+                            self.logger.warning(f"{codec_name} failed: {e}")
+                            out = None
+
+                    # If MP4 didn't work, try AVI with XVID as last resort
+                    if out is None:
+                        try:
+                            avi_path = base_path + '.avi'
+                            fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                            out = cv2.VideoWriter(avi_path, fourcc, estimated_fps, (w, h))
+                            if out.isOpened():
+                                writer_dimensions = (w, h)
+                                self.logger.info(f"✅ Video writer initialized (AVI/XVID fallback): {w}x{h} @ {estimated_fps:.1f} FPS")
+                                self.logger.info(f"   Output file: {avi_path}")
+                            else:
+                                out = None
+                        except Exception as e:
+                            self.logger.error(f"All video formats failed: {e}")
+                            out = None
+
                     if out is None:
                         self.logger.error("❌ Complete video writer failure - no video will be saved!")
                         self.logger.error("   All codecs failed. Check OpenCV installation.")

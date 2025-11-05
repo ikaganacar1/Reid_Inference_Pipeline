@@ -63,8 +63,17 @@ export const apiService = {
   // Configurations
   listConfigs: () => api.get('/api/configs'),
 
+  getConfig: (configId) => api.get(`/api/configs/${configId}`),
+
   saveConfig: (name, config) =>
     api.post('/api/configs', config, { params: { name } }),
+
+  updateConfig: (configId, name, config) =>
+    api.put(`/api/configs/${configId}`, config, { params: { name } }),
+
+  deleteConfig: (configId) => api.delete(`/api/configs/${configId}`),
+
+  getBaseURL: () => API_BASE_URL || window.location.origin,
 };
 
 // WebSocket connection
