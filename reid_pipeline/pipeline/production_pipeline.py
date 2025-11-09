@@ -63,9 +63,9 @@ class ProductionReIDPipeline:
                  reid_threshold_new: float = 0.50,
                  gallery_max_size: int = 500,
                  reid_batch_size: int = 16,
-                 queue_size_input: int = 10,
-                 queue_size_processing: int = 50,
-                 queue_size_output: int = 20,
+                 queue_size_input: int = 30,
+                 queue_size_processing: int = 100,
+                 queue_size_output: int = 50,
                  enable_display: bool = True,
                  use_tensorrt: bool = False,
                  tensorrt_precision: str = 'fp16',
@@ -221,19 +221,24 @@ class ProductionReIDPipeline:
                 )
                 
                 try:
-                    # Original logic (which is fine, just needs the sleep)
+                    # Try non-blocking first
                     self.input_queue.put(packet, block=False)
                     self.stats['frames_captured'] += 1
                     frame_id += 1
                 except queue.Full:
-                    # This will now happen much less, if at all
-                    self.logger.warning("Input queue full, dropping frame (pipeline is lagging)")
-                    # Drop oldest frame to prevent blocking
+                    # Log warning only every 30 frames to reduce spam
+                    if frame_id % 30 == 0:
+                        self.logger.warning(f"Input queue full at frame {frame_id}, pipeline is lagging")
+
+                    # Block briefly (up to 0.5s) instead of dropping immediately
                     try:
-                        self.input_queue.get_nowait()
-                        self.input_queue.put(packet, block=False)
-                    except queue.Empty:
-                        pass # Another thread emptied it
+                        self.input_queue.put(packet, block=True, timeout=0.5)
+                        self.stats['frames_captured'] += 1
+                        frame_id += 1
+                    except queue.Full:
+                        # Only drop if still full after waiting
+                        if frame_id % 30 == 0:
+                            self.logger.warning(f"Dropped frame {frame_id} after timeout")
                 
                 # Track queue size
                 self.stats['queue_sizes']['input'].append(self.input_queue.qsize())
@@ -382,12 +387,19 @@ class ProductionReIDPipeline:
                 processing_time = time.time() - start_time
                 self.stats['processing_times'].append(processing_time)
                 
-                # Put in output queue
+                # Put in output queue with backpressure
                 try:
-                    self.output_queue.put(packet, timeout=0.1)
+                    self.output_queue.put(packet, block=False)
                     self.stats['frames_processed'] += 1
                 except queue.Full:
-                    self.logger.warning("Output queue full, dropping packet")
+                    # Block briefly (up to 0.5s) instead of dropping
+                    try:
+                        self.output_queue.put(packet, block=True, timeout=0.5)
+                        self.stats['frames_processed'] += 1
+                    except queue.Full:
+                        # Only log occasionally to reduce spam
+                        if self.stats['frames_processed'] % 30 == 0:
+                            self.logger.warning(f"Output queue full, dropped packet at frame {self.stats['frames_processed']}")
                 
                 # Track queue size
                 self.stats['queue_sizes']['output'].append(self.output_queue.qsize())

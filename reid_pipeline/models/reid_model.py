@@ -118,17 +118,30 @@ class BatchReIDExtractor:
         self.use_tensorrt = use_tensorrt
         self.logger = logger or logging.getLogger(__name__)
         
-        # Initialize model
-        if use_tensorrt and model_path and model_path.endswith('.engine'):
+        # Initialize model - auto-detect TensorRT engine files
+        if model_path and model_path.endswith('.engine'):
+            self.logger.info(f"Detected TensorRT engine file: {model_path}")
             self.model = self._load_tensorrt_model(model_path)
             self.inference_mode = 'tensorrt'
-        else:
+            self.use_tensorrt = True  # Auto-enable TensorRT for .engine files
+        elif model_path and model_path.endswith('.pth'):
+            self.logger.info(f"Detected PyTorch model file: {model_path}")
             self.model = ReIDModel(embedding_dim=embedding_dim).to(self.device)
             self.model.eval()
-            
-            if model_path:
-                self._load_pytorch_model(model_path)
-            
+            self._load_pytorch_model(model_path)
+            self.inference_mode = 'pytorch'
+        elif model_path:
+            # Unknown format, try PyTorch
+            self.logger.warning(f"Unknown model format: {model_path}, attempting PyTorch loading")
+            self.model = ReIDModel(embedding_dim=embedding_dim).to(self.device)
+            self.model.eval()
+            self._load_pytorch_model(model_path)
+            self.inference_mode = 'pytorch'
+        else:
+            # No model path - use random initialization
+            self.logger.warning("No model path provided, using randomly initialized model")
+            self.model = ReIDModel(embedding_dim=embedding_dim).to(self.device)
+            self.model.eval()
             self.inference_mode = 'pytorch'
         
         # Preprocessing
@@ -162,44 +175,104 @@ class BatchReIDExtractor:
     
     def _load_pytorch_model(self, model_path: str):
         """Load PyTorch model weights"""
+        if Path(model_path).suffix != '.pth':
+            raise ValueError(f"Unsupported model format: {model_path}")
+
+        # Try loading with weights_only=True first (safer, doesn't require external dependencies)
+        checkpoint = None
+
+        # First, try with omegaconf safe globals (if available)
         try:
-            if Path(model_path).suffix == '.pth':
-                checkpoint = torch.load(model_path, map_location=self.device)
-                
-                # Handle different checkpoint formats
-                if isinstance(checkpoint, dict):
-                    if 'state_dict' in checkpoint:
-                        self.model.load_state_dict(checkpoint['state_dict'])
-                    elif 'model' in checkpoint:
-                        self.model.load_state_dict(checkpoint['model'])
-                    else:
-                        self.model.load_state_dict(checkpoint)
+            self.logger.info("Attempting to load model with weights_only=True (with omegaconf safe globals)...")
+            try:
+                from omegaconf import ListConfig, DictConfig
+                torch.serialization.add_safe_globals([ListConfig, DictConfig])
+                self.logger.info("Added omegaconf types to safe globals")
+            except ImportError:
+                self.logger.info("omegaconf not available, proceeding without it")
+
+            checkpoint = torch.load(model_path, map_location=self.device, weights_only=True)
+            self.logger.info("✅ Successfully loaded with weights_only=True")
+        except Exception as e:
+            self.logger.warning(f"weights_only=True failed: {str(e)[:200]}...")
+
+            # Fall back to weights_only=False (allows nvidia_tao_core, etc.)
+            try:
+                self.logger.info("Attempting to load model with weights_only=False...")
+                checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+                self.logger.info("✅ Successfully loaded with weights_only=False")
+            except ModuleNotFoundError as e:
+                if 'nvidia_tao_core' in str(e):
+                    error_msg = (
+                        "Model requires nvidia_tao_core but it's not installed. "
+                        "Options: 1) Install via 'pip install nvidia-tao-core', or "
+                        "2) Use a model checkpoint that doesn't require TAO dependencies, or "
+                        "3) Use TensorRT .engine model instead"
+                    )
+                    self.logger.error(error_msg)
+                    raise RuntimeError(error_msg) from e
+                elif 'omegaconf' in str(e):
+                    error_msg = (
+                        "Model requires omegaconf but it's not installed. "
+                        "Install via 'pip install omegaconf'"
+                    )
+                    self.logger.error(error_msg)
+                    raise RuntimeError(error_msg) from e
+                else:
+                    raise
+            except Exception as e:
+                self.logger.error(f"Failed to load model: {e}")
+                raise RuntimeError(f"Failed to load ReID model from {model_path}: {e}") from e
+
+        # Handle different checkpoint formats
+        try:
+            if isinstance(checkpoint, dict):
+                if 'state_dict' in checkpoint:
+                    self.model.load_state_dict(checkpoint['state_dict'])
+                elif 'model' in checkpoint:
+                    self.model.load_state_dict(checkpoint['model'])
                 else:
                     self.model.load_state_dict(checkpoint)
-                
-                self.logger.info(f"Loaded PyTorch model from {model_path}")
             else:
-                raise ValueError(f"Unsupported model format: {model_path}")
-                
+                self.model.load_state_dict(checkpoint)
+
+            self.logger.info(f"✅ Loaded PyTorch model from {model_path}")
         except Exception as e:
-            self.logger.error(f"Error loading model: {e}")
-            self.logger.warning("Using randomly initialized model")
+            error_msg = f"Failed to load state dict from checkpoint: {e}"
+            self.logger.error(error_msg)
+            raise RuntimeError(error_msg) from e
     
     def _load_tensorrt_model(self, engine_path: str):
         """Load TensorRT engine"""
         try:
             import tensorrt as trt
             import pycuda.driver as cuda
-            
+
             cuda.init()
             self.cuda_ctx = cuda.Device(0).make_context()  # ADDED: Store context
-            
+
             # Load engine
             with open(engine_path, 'rb') as f:
                 engine_data = f.read()
-            
+
             runtime = trt.Runtime(trt.Logger(trt.Logger.WARNING))
             engine = runtime.deserialize_cuda_engine(engine_data)
+
+            # Check if engine loaded successfully
+            if engine is None:
+                error_msg = (
+                    f"Failed to deserialize TensorRT engine from {engine_path}. "
+                    f"This usually means:\n"
+                    f"1. The engine was built with a different TensorRT version\n"
+                    f"2. The engine is corrupted\n"
+                    f"3. The engine was built for a different GPU architecture\n\n"
+                    f"Current TensorRT version: {trt.__version__}\n"
+                    f"Solution: Rebuild the engine with the correct TensorRT version using:\n"
+                    f"  docker compose exec worker python3 /app/rebuild_engines.py"
+                )
+                self.logger.error(error_msg)
+                raise RuntimeError(error_msg)
+
             context = engine.create_execution_context()
             
             # --- START OF FIX ---
@@ -239,9 +312,23 @@ class BatchReIDExtractor:
                 output_name = 'fc_pred'  # FIXED: Use correct output name from error messages
                 self.logger.warning(f"No output tensor found. Defaulting to: {output_name}")
                 
+            # CRITICAL FIX: Detect embedding dimension from engine output shape
+            output_shape = engine.get_tensor_shape(output_name)
+            detected_embedding_dim = output_shape[-1]  # Last dimension is embedding size
+
+            if detected_embedding_dim != self.embedding_dim:
+                self.logger.warning(
+                    f"Embedding dimension mismatch! "
+                    f"Engine outputs {detected_embedding_dim}D embeddings, "
+                    f"but config specifies {self.embedding_dim}D. "
+                    f"Using engine's dimension: {detected_embedding_dim}"
+                )
+                self.embedding_dim = detected_embedding_dim
+
             self.logger.info(f"Loaded TensorRT engine from {engine_path}")
             self.logger.info(f"Input name: {input_name}, Output name: {output_name}")
-            
+            self.logger.info(f"Output shape: {output_shape}, Embedding dimension: {self.embedding_dim}")
+
             return {
                 'engine': engine,
                 'context': context,

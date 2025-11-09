@@ -84,6 +84,25 @@ class PipelineWorker:
         self.running = True
         logger.info("Pipeline worker initialized")
 
+    def _serialize_stats(self, stats: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Convert stats dictionary to JSON-serializable format.
+        Converts deque objects to lists.
+        """
+        from collections import deque
+
+        def convert_value(v):
+            if isinstance(v, deque):
+                return list(v)
+            elif isinstance(v, dict):
+                return {k: convert_value(val) for k, val in v.items()}
+            elif isinstance(v, (list, tuple)):
+                return [convert_value(item) for item in v]
+            else:
+                return v
+
+        return {k: convert_value(v) for k, v in stats.items()}
+
     def update_job_status(self, job_id: str, status: str, **kwargs):
         """Update job status in Redis and PostgreSQL"""
         try:
@@ -200,11 +219,14 @@ class PipelineWorker:
                     frames_captured = pipeline.stats.get('frames_captured', 1)
                     progress = min(100.0, (frames_processed / frames_captured) * 100) if frames_captured > 0 else 0.0
 
+                    # Convert stats to JSON-serializable format
+                    serializable_stats = self._serialize_stats(pipeline.stats)
+
                     self.update_job_status(
                         job_id,
                         "running",
                         progress=progress,
-                        stats=pipeline.stats
+                        stats=serializable_stats
                     )
 
             # Start a background thread to update progress
@@ -301,11 +323,14 @@ class PipelineWorker:
                         total_processed = sum(pipeline.stats['frames_processed'])
                         avg_progress = (total_processed / 4) if total_processed > 0 else 0.0
 
+                        # Convert stats to JSON-serializable format
+                        serializable_stats = self._serialize_stats(pipeline.stats)
+
                         self.update_job_status(
                             job_id,
                             "running",
                             progress=min(100.0, avg_progress / 10.0),  # Rough estimate
-                            stats=pipeline.stats
+                            stats=serializable_stats
                         )
 
                     time.sleep(2)

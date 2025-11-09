@@ -461,7 +461,7 @@ if __name__ == "__main__":
 
     )"""
     
-    converter.onnx_to_tensorrt(
+    """converter.onnx_to_tensorrt(
             onnx_path=Path("/home/ika/yzlm/Reid_Inference_Pipeline/test_the_pipeline/reid_ltcc.onnx"),
             engine_path=Path("/home/ika/yzlm/Reid_Inference_Pipeline/test_the_pipeline/reid_ltcc.engine")
-        )
+        )"""

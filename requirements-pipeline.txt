@@ -1,15 +1,21 @@
 # Core ML/CV dependencies
-opencv-python==4.8.1.78
-numpy==1.24.3
-Pillow==10.1.0
+opencv-python
+numpy
+Pillow
+omegaconf  # Required for loading some PyTorch model checkpoints
 
 # Deep Learning
 ultralytics
 
-# ReID Pipeline dependencies
-redis==5.0.1
-psycopg2-binary==2.9.9
-pyyaml==6.0.1
+# NVIDIA TAO dependencies (optional - for loading TAO-trained models)
+# Note: If nvidia-tao-core is not available, model loading will still work
+# with weights_only=False if you trust the checkpoint source
+# WARNING: nvidia-tao-core is a HUGE package that takes hours to install
+# Only uncomment if you absolutely need it for .pth models
+# For TensorRT .engine models, this is NOT needed
+# nvidia-tao-core
 
-# Optional: TensorRT (install separately on Jetson)
-# pycuda==2022.2.2
+# ReID Pipeline dependencies
+redis
+psycopg2-binary
+pyyaml

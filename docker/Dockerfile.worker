@@ -1,9 +1,35 @@
+# =========================================================================
+# STAGE 1: Builder - Compile PyCUDA
+# We use a -devel image because it has the CUDA compiler (nvcc) and headers
+# needed to compile PyCUDA from source.
+# =========================================================================
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04 AS builder
+
+# Install build dependencies for PyCUDA
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 \
+    python3-pip \
+    python3-dev \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Upgrade pip and build tools
+RUN pip3 install --no-cache-dir --upgrade pip wheel setuptools
+
+# Compile PyCUDA (this requires nvcc from the devel image)
+RUN pip3 install --no-cache-dir pycuda
+
+
+# =========================================================================
+# STAGE 2: Final Runtime Image
+# We use the smaller -runtime image for the final application.
+# =========================================================================
 FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04
 
 WORKDIR /app
 
-# Install Python and system dependencies
-RUN apt-get update && apt-get install -y \
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 \
     python3-pip \
     libgl1-mesa-glx \
@@ -14,15 +40,35 @@ RUN apt-get update && apt-get install -y \
     libgomp1 \
     postgresql-client \
     ffmpeg \
+    wget \
+    gnupg2 \
     && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip
-RUN pip3 install --no-cache-dir --upgrade pip
+# Add NVIDIA CUDA repository for TensorRT
+RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.0-1_all.deb && \
+    dpkg -i cuda-keyring_1.0-1_all.deb && \
+    rm cuda-keyring_1.0-1_all.deb
 
-# Install PyTorch with CUDA 12.8 support for RTX 5070 (compute capability 12.0)
+# Install TensorRT runtime libraries via apt (MUCH faster than pip)
+# Note: Using meta-package for simplicity - it pulls all necessary runtime libs
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    tensorrt-libs \
+    python3-libnvinfer \
+    python3-libnvinfer-dispatch \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy pre-compiled PyCUDA from builder stage
+COPY --from=builder /usr/local/lib/python3.10/dist-packages/pycuda /usr/local/lib/python3.10/dist-packages/pycuda
+COPY --from=builder /usr/local/lib/python3.10/dist-packages/pycuda-*.dist-info /usr/local/lib/python3.10/dist-packages/
+
+# Upgrade pip and essential tools
+RUN pip3 install --no-cache-dir --upgrade pip wheel setuptools packaging
+
+# Install PyTorch with CUDA 12.8 support
 RUN pip3 install --no-cache-dir \
-    torch==2.7.0 \
-    torchvision==0.22.0 \
+    torch \
+    torchvision \
     --index-url https://download.pytorch.org/whl/cu128
 
 # Install pipeline dependencies

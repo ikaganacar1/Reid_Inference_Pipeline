@@ -69,6 +69,7 @@ services:
       dockerfile: docker/Dockerfile.worker
     container_name: reid_worker
     runtime: nvidia  # Requires nvidia-docker
+    shm_size: 8gb  # CRITICAL for TensorRT engine building
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -80,21 +81,29 @@ services:
       - OUTPUT_DIR=/app/outputs
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      - CUDA_LAUNCH_BLOCKING=1
     volumes:
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
       - ./reid_pipeline:/app/reid_pipeline  # Mount pipeline code
       - ./models:/app/models  # Mount model files
+      - ./rebuild_engines.py:/app/rebuild_engines.py  # Mount rebuild script
     depends_on:
       redis:
         condition: service_healthy
       postgres:
         condition: service_healthy
     restart: unless-stopped
+    ulimits:
+      memlock: -1
+      stack: 67108864
     deploy:
       resources:
+        limits:
+          cpus: '12'
+          memory: 16G
         reservations:
+          cpus: '6'
+          memory: 8G
           devices:
             - driver: nvidia
               count: 1
