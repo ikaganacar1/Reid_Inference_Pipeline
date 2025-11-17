@@ -669,6 +669,78 @@ async def delete_config(config_id: int):
         logger.error(f"Error deleting config: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/models")
+async def list_models():
+    """List available YOLO and ReID models from /app/models directory"""
+    try:
+        models_dir = Path("/app/models")
+
+        if not models_dir.exists():
+            logger.warning(f"Models directory not found: {models_dir}")
+            return {
+                "success": True,
+                "yolo_models": [],
+                "reid_models": []
+            }
+
+        # Find YOLO models (.pt, .engine files)
+        yolo_extensions = ['.pt', '.engine']
+        yolo_models = []
+
+        for ext in yolo_extensions:
+            yolo_files = list(models_dir.glob(f'*yolo*{ext}'))
+            yolo_files.extend(list(models_dir.glob(f'*YOLO*{ext}')))
+            # Also include generic model files that might be YOLO
+            if ext == '.pt':
+                yolo_files.extend(list(models_dir.glob(f'yolo11*{ext}')))
+
+            for file_path in yolo_files:
+                if file_path.name not in [m['filename'] for m in yolo_models]:
+                    yolo_models.append({
+                        'filename': file_path.name,
+                        'path': str(file_path),
+                        'size': file_path.stat().st_size,
+                        'type': ext[1:]  # Remove leading dot
+                    })
+
+        # Find ReID models (.pth, .pt, .engine, .onnx files)
+        reid_extensions = ['.pth', '.pt', '.engine', '.onnx']
+        reid_models = []
+
+        # Common ReID model name patterns
+        reid_patterns = ['*reid*', '*ReID*', '*resnet*', '*lttc*', '*LTTC*']
+
+        for ext in reid_extensions:
+            for pattern in reid_patterns:
+                reid_files = list(models_dir.glob(f'{pattern}{ext}'))
+
+                for file_path in reid_files:
+                    # Exclude YOLO models
+                    if 'yolo' not in file_path.name.lower():
+                        if file_path.name not in [m['filename'] for m in reid_models]:
+                            reid_models.append({
+                                'filename': file_path.name,
+                                'path': str(file_path),
+                                'size': file_path.stat().st_size,
+                                'type': ext[1:]
+                            })
+
+        # Sort by filename
+        yolo_models.sort(key=lambda x: x['filename'])
+        reid_models.sort(key=lambda x: x['filename'])
+
+        logger.info(f"Found {len(yolo_models)} YOLO models and {len(reid_models)} ReID models")
+
+        return {
+            "success": True,
+            "yolo_models": yolo_models,
+            "reid_models": reid_models
+        }
+
+    except Exception as e:
+        logger.error(f"Error listing models: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time updates"""

@@ -112,10 +112,11 @@ class ProductionReIDPipeline:
             tensorrt_precision=tensorrt_precision,
             logger=self.logger
         )
-        
-        # Initialize gallery manager
+
+        # Initialize gallery manager with correct embedding dimension from ReID model
         self.gallery_manager = GalleryManager(
             max_gallery_size=gallery_max_size,
+            embedding_dim=self.reid_extractor.embedding_dim,  # Use actual embedding dimension
             similarity_threshold_match=reid_threshold_match,
             similarity_threshold_new=reid_threshold_new,
             logger=self.logger

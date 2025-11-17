@@ -73,6 +73,9 @@ export const apiService = {
 
   deleteConfig: (configId) => api.delete(`/api/configs/${configId}`),
 
+  // Models
+  listModels: () => api.get('/api/models'),
+
   getBaseURL: () => API_BASE_URL || window.location.origin,
 };
 
