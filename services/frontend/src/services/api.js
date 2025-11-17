@@ -3,7 +3,9 @@ import axios from 'axios';
 // Use relative URLs in production (goes through nginx proxy)
 // In development, you can set REACT_APP_API_URL=http://localhost:8000
 const API_BASE_URL = process.env.REACT_APP_API_URL || '';
-const WS_BASE_URL = process.env.REACT_APP_WS_URL || `ws://${window.location.host}`;
+// Automatically use wss:// for HTTPS and ws:// for HTTP
+const WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+const WS_BASE_URL = process.env.REACT_APP_WS_URL || `${WS_PROTOCOL}//${window.location.host}`;
 
 // Create axios instance
 const api = axios.create({
@@ -49,12 +51,14 @@ export const apiService = {
       params: { video_paths: videoPaths },
     }),
 
-  listJobs: (limit = 20, offset = 0) =>
-    api.get('/api/jobs', { params: { limit, offset } }),
+  listJobs: (limit = 20, offset = 0, sortBy = 'created_at', sortOrder = 'desc') =>
+    api.get('/api/jobs', { params: { limit, offset, sort_by: sortBy, sort_order: sortOrder } }),
 
   getJob: (jobId) => api.get(`/api/jobs/${jobId}`),
 
   cancelJob: (jobId) => api.delete(`/api/jobs/${jobId}`),
+
+  bulkDeleteJobs: (jobIds) => api.post('/api/jobs/bulk-delete', jobIds),
 
   downloadOutput: (jobId) => api.get(`/api/output/${jobId}`, {
     responseType: 'blob',

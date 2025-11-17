@@ -370,19 +370,34 @@ async def start_multi_camera_pipeline(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/jobs")
-async def list_jobs(limit: int = 20, offset: int = 0):
-    """List all pipeline jobs"""
+async def list_jobs(
+    limit: int = 20,
+    offset: int = 0,
+    sort_by: str = "created_at",
+    sort_order: str = "desc"
+):
+    """List all pipeline jobs with sorting options"""
     try:
         conn = get_db_connection()
         if not conn:
             raise HTTPException(status_code=500, detail="Database connection failed")
 
+        # Validate sort parameters
+        allowed_sort_fields = ["created_at", "status", "progress", "job_id"]
+        if sort_by not in allowed_sort_fields:
+            sort_by = "created_at"
+
+        allowed_sort_orders = ["asc", "desc"]
+        if sort_order.lower() not in allowed_sort_orders:
+            sort_order = "desc"
+
         cursor = conn.cursor()
-        cursor.execute("""
+        query = f"""
             SELECT * FROM pipeline_jobs
-            ORDER BY created_at DESC
+            ORDER BY {sort_by} {sort_order.upper()}
             LIMIT %s OFFSET %s
-        """, (limit, offset))
+        """
+        cursor.execute(query, (limit, offset))
 
         jobs = cursor.fetchall()
 
@@ -397,7 +412,9 @@ async def list_jobs(limit: int = 20, offset: int = 0):
             "jobs": jobs,
             "total": total,
             "limit": limit,
-            "offset": offset
+            "offset": offset,
+            "sort_by": sort_by,
+            "sort_order": sort_order
         }
 
     except Exception as e:
@@ -471,6 +488,57 @@ async def cancel_job(job_id: str):
 
     except Exception as e:
         logger.error(f"Error cancelling job: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/jobs/bulk-delete")
+async def bulk_delete_jobs(job_ids: List[str]):
+    """Delete multiple jobs and their output files"""
+    try:
+        deleted_count = 0
+        errors = []
+
+        for job_id in job_ids:
+            try:
+                # Get job info to find output file
+                conn = get_db_connection()
+                if conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT output_video FROM pipeline_jobs WHERE job_id = %s", (job_id,))
+                    result = cursor.fetchone()
+
+                    # Delete output file if exists
+                    if result and result['output_video']:
+                        output_path = Path(result['output_video'])
+                        if output_path.exists():
+                            output_path.unlink()
+                            logger.info(f"Deleted output file: {output_path}")
+
+                    # Delete from database
+                    cursor.execute("DELETE FROM pipeline_jobs WHERE job_id = %s", (job_id,))
+                    conn.commit()
+                    cursor.close()
+                    conn.close()
+
+                    # Delete from Redis
+                    if redis_client:
+                        redis_client.delete(f"job:{job_id}")
+
+                    deleted_count += 1
+                    logger.info(f"Deleted job: {job_id}")
+
+            except Exception as e:
+                logger.error(f"Error deleting job {job_id}: {e}")
+                errors.append({"job_id": job_id, "error": str(e)})
+
+        return {
+            "success": True,
+            "deleted_count": deleted_count,
+            "total_requested": len(job_ids),
+            "errors": errors
+        }
+
+    except Exception as e:
+        logger.error(f"Error in bulk delete: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/output/{job_id}")
