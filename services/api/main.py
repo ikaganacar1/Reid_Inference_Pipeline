@@ -865,6 +865,125 @@ async def start_broadcast_task():
     """Start background task for broadcasting updates"""
     asyncio.create_task(broadcast_job_updates())
 
+# ============================================================================
+# EVALUATION API ENDPOINTS
+# ============================================================================
+
+class EvaluationConfig(BaseModel):
+    dataset_id: int
+    yolo_model: str = "yolo11n.pt"
+    reid_model: Optional[str] = None
+    reid_threshold_match: float = 0.70
+    reid_threshold_new: float = 0.50
+    gallery_max_size: int = 1500
+    reid_batch_size: int = 16
+    use_tensorrt: bool = False
+    subset_size: Optional[int] = None
+
+@app.post("/api/datasets/upload")
+async def upload_dataset(file: UploadFile = File(...)):
+    """Upload Market-1501 dataset (zip file)"""
+    try:
+        # Save uploaded file
+        dataset_id = str(uuid.uuid4())[:8]
+        dataset_dir = OUTPUT_DIR.parent / "datasets" / dataset_id
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+
+        zip_path = dataset_dir / file.filename
+        with open(zip_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+        # Extract zip
+        import zipfile
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(dataset_dir)
+
+        # Store in database
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO datasets (name, dataset_type, upload_path, num_query, num_gallery, status)
+            VALUES (%s, %s, %s, %s, %s, %s) RETURNING dataset_id
+        """, (file.filename, 'market1501', str(dataset_dir), 0, 0, 'uploaded'))
+        result = cursor.fetchone()
+        dataset_id_db = result['dataset_id']
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return {"dataset_id": dataset_id_db, "status": "uploaded", "path": str(dataset_dir)}
+    except Exception as e:
+        logger.error(f"Dataset upload failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/datasets")
+async def list_datasets():
+    """List all uploaded datasets"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM datasets ORDER BY created_at DESC")
+    datasets = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return {"datasets": datasets}
+
+@app.post("/api/evaluation/start")
+async def start_evaluation(config: EvaluationConfig):
+    """Start evaluation job"""
+    try:
+        job_id = str(uuid.uuid4())
+
+        # Create job in database
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO evaluation_jobs (eval_job_id, dataset_id, config, status, created_at)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (job_id, config.dataset_id, json.dumps(config.dict()), 'pending', datetime.now()))
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        # Push to Redis queue
+        job_data = {
+            "job_id": job_id,
+            "type": "evaluation",
+            "dataset_id": config.dataset_id,
+            "config": config.dict()
+        }
+        redis_client.lpush("pipeline_jobs", json.dumps(job_data))
+
+        return {"job_id": job_id, "status": "pending"}
+    except Exception as e:
+        logger.error(f"Failed to start evaluation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/evaluation/jobs/{job_id}")
+async def get_evaluation_job(job_id: str):
+    """Get evaluation job status and results"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM evaluation_jobs WHERE eval_job_id = %s", (job_id,))
+    job = cursor.fetchone()
+    cursor.close()
+    conn.close()
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    return dict(job)
+
+@app.get("/api/evaluation/jobs")
+async def list_evaluation_jobs():
+    """List all evaluation jobs"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM evaluation_jobs ORDER BY created_at DESC LIMIT 50")
+    jobs = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return {"jobs": jobs}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

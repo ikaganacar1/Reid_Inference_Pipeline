@@ -26,12 +26,12 @@ class MatchDecision(Enum):
 class GalleryEntry:
     """
     Gallery entry with circular buffer for dynamic representation.
-    
+
     Memory footprint per entry (with 2048-D embeddings, 10-frame buffer):
     - Circular buffer: 2048 * 10 * 4 bytes = 81,920 bytes (~80KB)
     - Metadata: ~1KB
     Total: ~81KB per identity
-    
+
     For 100 identities: ~8.1MB
     """
     person_id: int
@@ -43,14 +43,17 @@ class GalleryEntry:
     frames_since_seen: int = 0
     appearance_count: int = 0
     track_state: str = "active"  # active, lost, deleted
-    
+
     # Temporal tracking
     last_bbox: Optional[np.ndarray] = None
     last_frame_id: int = -1
-    
+
     # Quality metrics
     avg_confidence: float = 0.0
     max_confidence: float = 0.0
+
+    # Camera tracking (for evaluation)
+    camera_id: Optional[int] = None  # Camera ID for same-camera exclusion
     
     def update_last_seen(self, frame_id: int):
         """Update last seen information"""
@@ -186,14 +189,16 @@ class GalleryManager:
     
     def match_queries_to_gallery(self,
                                  query_embeddings: np.ndarray,
-                                 query_confidences: np.ndarray) -> List[Tuple[int, MatchDecision, float]]:
+                                 query_confidences: np.ndarray,
+                                 query_camera_ids: Optional[np.ndarray] = None) -> List[Tuple[int, MatchDecision, float]]:
         """
         Match query embeddings to gallery using three-tier classification.
-        
+
         Args:
             query_embeddings: Query embeddings (N, D)
             query_confidences: Detection confidences (N,)
-            
+            query_camera_ids: Camera IDs for queries (N,) - enables same-camera exclusion
+
         Returns:
             List of (person_id or -1, decision, similarity_score) for each query
         """
@@ -212,7 +217,17 @@ class GalleryManager:
         similarity_matrix = self.compute_similarity_batch(
             query_embeddings, gallery_centroids
         )
-        
+
+        # Apply same-camera exclusion if camera IDs provided
+        if query_camera_ids is not None:
+            for i in range(len(query_embeddings)):
+                query_cam = query_camera_ids[i]
+                for j, gallery_id in enumerate(gallery_ids):
+                    gallery_cam = self.gallery[gallery_id].camera_id
+                    # Exclude if both cameras are known and match
+                    if gallery_cam is not None and query_cam == gallery_cam:
+                        similarity_matrix[i, j] = -1.0  # Mask out same-camera matches
+
         # Match each query
         results = []
         for i in range(len(query_embeddings)):
@@ -220,7 +235,7 @@ class GalleryManager:
             max_similarity = np.max(similarities)
             best_match_idx = np.argmax(similarities)
             best_person_id = gallery_ids[best_match_idx]
-            
+
             # Three-tier decision
             if max_similarity >= self.threshold_match:
                 decision = MatchDecision.MATCH
@@ -234,7 +249,7 @@ class GalleryManager:
                 decision = MatchDecision.NEW
                 person_id = -1
                 self.stats['new_decisions'] += 1
-            
+
             results.append((person_id, decision, float(max_similarity)))
         
         return results
@@ -245,18 +260,20 @@ class GalleryManager:
                       confidence: float,
                       frame_id: int,
                       bbox: Optional[np.ndarray] = None,
+                      camera_id: Optional[int] = None,
                       force_add: bool = False) -> bool:
         """
         Add new identity to gallery with quality control.
-        
+
         Args:
             person_id: Identity ID
             embedding: Feature vector
             confidence: Detection confidence
             frame_id: Current frame number
             bbox: Bounding box
+            camera_id: Camera ID (for same-camera exclusion in evaluation)
             force_add: Skip quality check
-            
+
         Returns:
             True if added successfully
         """
@@ -289,7 +306,8 @@ class GalleryManager:
             last_bbox=bbox,
             last_frame_id=frame_id,
             avg_confidence=confidence,
-            max_confidence=confidence
+            max_confidence=confidence,
+            camera_id=camera_id
         )
         
         self.gallery[person_id] = entry

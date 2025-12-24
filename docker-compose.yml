@@ -50,6 +50,7 @@ services:
     volumes:
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
+      - ./datasets:/app/datasets  # Shared dataset storage
       - ./models:/app/models:ro  # Read-only access to model files
       - ./services/api:/app  # For development hot-reload
     ports:
@@ -83,6 +84,7 @@ services:
     volumes:
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
+      - ./datasets:/app/datasets  # Shared dataset storage
       - ./reid_pipeline:/app/reid_pipeline  # Mount pipeline code
       - ./models:/app/models  # Mount model files
       - ./rebuild_engines.py:/app/rebuild_engines.py  # Mount rebuild script
@@ -115,7 +117,7 @@ services:
       dockerfile: docker/Dockerfile.frontend
     container_name: reid_frontend
     ports:
-      - "3000:80"
+      - "8009:80"
     depends_on:
       - api
     restart: unless-stopped

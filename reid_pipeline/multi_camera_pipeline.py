@@ -50,10 +50,12 @@ class MultiCameraReIDPipeline:
                  use_tensorrt: bool = False,
                  tensorrt_precision: str = 'fp16',
                  display_scale: float = 0.5,  # NEW: Scale factor for display
+                 enable_display: bool = True,  # NEW: Enable/disable display window
                  logger: Optional[logging.Logger] = None):
-        
+
         self.logger = logger or self._setup_logger()
         self.display_scale = display_scale  # NEW: Store display scale
+        self.enable_display = enable_display  # NEW: Store display setting
         
         # Shared detector (used in single thread, no lock needed)
         self.detector = EnhancedObjectDetector(
@@ -74,8 +76,10 @@ class MultiCameraReIDPipeline:
         )
         
         # SHARED gallery for all cameras (with lock for thread safety)
+        # Use actual embedding dimension from ReID model
         self.gallery_manager = GalleryManager(
             max_gallery_size=gallery_max_size,
+            embedding_dim=self.reid_extractor.embedding_dim,
             similarity_threshold_match=reid_threshold_match,
             similarity_threshold_new=reid_threshold_new,
             logger=self.logger
@@ -374,49 +378,24 @@ class MultiCameraReIDPipeline:
                     self.logger.info(f"📐 Final grid frame dimensions: {w}x{h}")
                     self.logger.info(f"🎬 Using FPS: {estimated_fps:.1f}")
                     
-                    # Based on codec test: MP4 codecs don't work, but AVI with XVID does!
-                    # Try AVI format first since we know it works
+                    # Use XVID codec which is reliable on Linux
+                    # Note: MP4 codecs often fail to write frames even when isOpened() returns True
                     base_path = output_path.replace('.mp4', '').replace('.avi', '')
-                    
-                    # Try MP4 with H.264 first for best browser compatibility
-                    mp4_path = base_path + '.mp4'
-                    codecs_to_try = [
-                        ('avc1', 'H.264 (avc1)'),  # Best browser support
-                        ('H264', 'H.264 (H264)'),  # Alternative H.264
-                        ('X264', 'H.264 (X264)'),  # Linux H.264
-                        ('mp4v', 'MPEG-4'),        # Fallback (poor browser support)
-                    ]
+                    avi_path = base_path + '.avi'
 
-                    for codec_str, codec_name in codecs_to_try:
-                        try:
-                            fourcc = cv2.VideoWriter_fourcc(*codec_str)
-                            out = cv2.VideoWriter(mp4_path, fourcc, estimated_fps, (w, h))
-                            if out.isOpened():
-                                writer_dimensions = (w, h)  # Store dimensions!
-                                self.logger.info(f"✅ Video writer initialized with {codec_name}: {w}x{h} @ {estimated_fps} FPS")
-                                self.logger.info(f"   Output file: {mp4_path}")
-                                break
-                            else:
-                                out = None
-                        except Exception as e:
-                            self.logger.warning(f"{codec_name} failed: {e}")
+                    try:
+                        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                        out = cv2.VideoWriter(avi_path, fourcc, estimated_fps, (w, h))
+                        if out.isOpened():
+                            writer_dimensions = (w, h)
+                            self.logger.info(f"✅ Video writer initialized (AVI/XVID): {w}x{h} @ {estimated_fps:.1f} FPS")
+                            self.logger.info(f"   Output file: {avi_path}")
+                        else:
                             out = None
-
-                    # If MP4 didn't work, try AVI with XVID as last resort
-                    if out is None:
-                        try:
-                            avi_path = base_path + '.avi'
-                            fourcc = cv2.VideoWriter_fourcc(*'XVID')
-                            out = cv2.VideoWriter(avi_path, fourcc, estimated_fps, (w, h))
-                            if out.isOpened():
-                                writer_dimensions = (w, h)
-                                self.logger.info(f"✅ Video writer initialized (AVI/XVID fallback): {w}x{h} @ {estimated_fps:.1f} FPS")
-                                self.logger.info(f"   Output file: {avi_path}")
-                            else:
-                                out = None
-                        except Exception as e:
-                            self.logger.error(f"All video formats failed: {e}")
-                            out = None
+                            self.logger.error("Failed to initialize XVID video writer")
+                    except Exception as e:
+                        self.logger.error(f"Video writer initialization failed: {e}")
+                        out = None
 
                     if out is None:
                         self.logger.error("❌ Complete video writer failure - no video will be saved!")
@@ -450,37 +429,39 @@ class MultiCameraReIDPipeline:
                 # Ensure frame is contiguous in memory
                 if not grid_frame_full.flags['C_CONTIGUOUS']:
                     grid_frame_full = np.ascontiguousarray(grid_frame_full)
-                
-                success = out.write(grid_frame_full)
-                if success:
-                    self.stats['frames_written'] += 1
-                    # Log progress every 100 frames
-                    if len(frame_times) >= 2 and self.stats['frames_written'] % 100 == 0:
-                        actual_fps = len(frame_times) / (frame_times[-1] - frame_times[0])
-                        self.logger.info(f"✍️  Writing at ~{actual_fps:.1f} FPS, {self.stats['frames_written']} frames written")
+
+                # VideoWriter.write() always returns None, just call it and count frames
+                out.write(grid_frame_full)
+                self.stats['frames_written'] += 1
+                # Log progress every 100 frames
+                if len(frame_times) >= 2 and self.stats['frames_written'] % 100 == 0:
+                    actual_fps = len(frame_times) / (frame_times[-1] - frame_times[0])
+                    self.logger.info(f"✍️  Writing at ~{actual_fps:.1f} FPS, {self.stats['frames_written']} frames written")
+            
+            # Display window handling (only if enabled)
+            if self.enable_display:
+                # Create scaled version for display
+                if self.display_scale != 1.0:
+                    display_h = int(grid_frame_full.shape[0] * self.display_scale)
+                    display_w = int(grid_frame_full.shape[1] * self.display_scale)
+                    grid_frame_display = cv2.resize(grid_frame_full, (display_w, display_h))
                 else:
-                    if self.stats['frames_written'] < 5:  # Log first few failures
-                        self.logger.error(f"❌ Frame write failed! Frames written so far: {self.stats['frames_written']}")
-                        self.logger.error(f"   Frame: {frame_w}x{frame_h}, dtype={grid_frame_full.dtype}, shape={grid_frame_full.shape}")
-            
-            # Create scaled version for display
-            if self.display_scale != 1.0:
-                display_h = int(grid_frame_full.shape[0] * self.display_scale)
-                display_w = int(grid_frame_full.shape[1] * self.display_scale)
-                grid_frame_display = cv2.resize(grid_frame_full, (display_w, display_h))
+                    grid_frame_display = grid_frame_full
+
+                # Show scaled display
+                cv2.imshow('Multi-Camera ReID (2x2 Grid)', grid_frame_display)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    self.running = False
             else:
-                grid_frame_display = grid_frame_full
-            
-            # Show scaled display
-            cv2.imshow('Multi-Camera ReID (2x2 Grid)', grid_frame_display)
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                self.running = False
-        
+                # In headless mode, still process events periodically
+                time.sleep(0.001)
+
         if out:
             out.release()
             self.logger.info(f"Video saved: {self.stats['frames_written']} frames written")
-        cv2.destroyAllWindows()
+        if self.enable_display:
+            cv2.destroyAllWindows()
         self.logger.info("Display thread: Stopped")
     
     def _create_grid(self, frames: List[Optional[np.ndarray]]):
@@ -592,9 +573,10 @@ if __name__ == "__main__":
     parser.add_argument('--new-thresh', type=float, default=0.7, help='New person threshold')
     parser.add_argument('--tensorrt', action='store_true', help='Use TensorRT')
     parser.add_argument('--display-scale', type=float, default=0.5, help='Display window scale (default: 0.5)')
-    
+    parser.add_argument('--no-display', action='store_true', help='Disable display window (headless mode)')
+
     args = parser.parse_args()
-    
+
     pipeline = MultiCameraReIDPipeline(
         yolo_model_path=args.yolo,
         reid_model_path=args.reid,
@@ -606,7 +588,8 @@ if __name__ == "__main__":
         reid_batch_size=16,
         use_tensorrt=args.tensorrt,
         tensorrt_precision='fp16',
-        display_scale=args.display_scale
+        display_scale=args.display_scale,
+        enable_display=not args.no_display
     )
     
     pipeline.run(args.videos, args.output)

@@ -12,6 +12,10 @@ import JobsList from './pages/JobsList';
 import JobDetail from './pages/JobDetail';
 import ResultsViewer from './pages/ResultsViewer';
 import Configurations from './pages/Configurations';
+import DatasetManager from './pages/DatasetManager';
+import Evaluation from './pages/Evaluation';
+import EvaluationJobs from './pages/EvaluationJobs';
+import EvaluationResults from './pages/EvaluationResults';
 
 // Premium theme with glassmorphism and gradients
 const premiumTheme = createTheme({
@@ -228,6 +232,10 @@ function App() {
               <Route path="/jobs/:jobId" element={<JobDetail />} />
               <Route path="/results/:jobId" element={<ResultsViewer />} />
               <Route path="/configs" element={<Configurations />} />
+              <Route path="/datasets" element={<DatasetManager />} />
+              <Route path="/evaluation" element={<Evaluation />} />
+              <Route path="/evaluation/jobs" element={<EvaluationJobs />} />
+              <Route path="/evaluation/results/:jobId" element={<EvaluationResults />} />
             </Routes>
           </Box>
         </Box>

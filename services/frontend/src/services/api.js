@@ -80,6 +80,41 @@ export const apiService = {
   // Models
   listModels: () => api.get('/api/models'),
 
+  // Datasets
+  uploadDataset: (file, name, onProgress) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('name', name);
+
+    return api.post('/api/datasets/upload', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+      onUploadProgress: (progressEvent) => {
+        if (onProgress) {
+          const percentCompleted = Math.round(
+            (progressEvent.loaded * 100) / progressEvent.total
+          );
+          onProgress(percentCompleted);
+        }
+      },
+    });
+  },
+
+  listDatasets: () => api.get('/api/datasets'),
+
+  getDataset: (datasetId) => api.get(`/api/datasets/${datasetId}`),
+
+  deleteDataset: (datasetId) => api.delete(`/api/datasets/${datasetId}`),
+
+  // Evaluation
+  startEvaluation: (config) => api.post('/api/evaluation/start', config),
+
+  listEvaluationJobs: (limit = 20, offset = 0) =>
+    api.get('/api/evaluation/jobs', { params: { limit, offset } }),
+
+  getEvaluationJob: (jobId) => api.get(`/api/evaluation/jobs/${jobId}`),
+
   getBaseURL: () => API_BASE_URL || window.location.origin,
 };
 

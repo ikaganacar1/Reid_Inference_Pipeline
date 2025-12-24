@@ -10,6 +10,7 @@ import time
 import logging
 import redis
 import psycopg2
+import psycopg2.extras
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, Optional
@@ -66,13 +67,14 @@ redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=Tr
 
 # Database connection
 def get_db_connection():
-    """Get PostgreSQL database connection"""
+    """Get PostgreSQL database connection with RealDictCursor"""
     return psycopg2.connect(
         host=DB_HOST,
         port=DB_PORT,
         database=DB_NAME,
         user=DB_USER,
-        password=DB_PASSWORD
+        password=DB_PASSWORD,
+        cursor_factory=psycopg2.extras.RealDictCursor
     )
 
 
@@ -380,6 +382,88 @@ class PipelineWorker:
                 error_message=str(e)
             )
 
+    def process_evaluation_job(self, job_data: Dict[str, Any]):
+        """Process Market-1501 evaluation job"""
+        job_id = job_data["job_id"]
+        dataset_id = job_data["dataset_id"]
+        config = job_data["config"]
+
+        try:
+            logger.info(f"Starting evaluation job: {job_id}")
+
+            # Get dataset path from database
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT upload_path FROM datasets WHERE dataset_id = %s", (dataset_id,))
+            result = cursor.fetchone()
+            cursor.close()
+            conn.close()
+
+            if not result:
+                raise ValueError(f"Dataset {dataset_id} not found")
+
+            dataset_path = Path(result['upload_path'])
+
+            # Update status to running
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE evaluation_jobs SET status = %s, started_at = %s WHERE eval_job_id = %s
+            """, ('running', datetime.now(), job_id))
+            conn.commit()
+            cursor.close()
+            conn.close()
+
+            # Import evaluation pipeline
+            from reid_pipeline.evaluation.evaluation_pipeline import Market1501EvaluationPipeline
+
+            # Run evaluation
+            pipeline = Market1501EvaluationPipeline(
+                dataset_path=dataset_path,
+                reid_model_path=resolve_model_path(config.get("reid_model", "lttc_0.1.4.49.pth")),
+                config=config
+            )
+
+            # Use subset_size from config, or None for full dataset
+            subset_size = config.get("subset_size", None)
+            results = pipeline.run_evaluation(subset_size=subset_size)
+
+            # Store results in database
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE evaluation_jobs
+                SET status = %s, completed_at = %s, progress = %s,
+                    map_score = %s, rank1_accuracy = %s, rank5_accuracy = %s, rank10_accuracy = %s,
+                    gallery_stats = %s, performance_stats = %s
+                WHERE eval_job_id = %s
+            """, (
+                'completed', datetime.now(), 100.0,
+                results['standard_metrics']['mAP'],
+                results['standard_metrics']['rank1'],
+                results['standard_metrics']['rank5'],
+                results['standard_metrics']['rank10'],
+                json.dumps(results['gallery_metrics']),
+                json.dumps(results['performance_metrics']),
+                job_id
+            ))
+            conn.commit()
+            cursor.close()
+            conn.close()
+
+            logger.info(f"Evaluation job {job_id} completed: mAP={results['standard_metrics']['mAP']:.2f}%")
+
+        except Exception as e:
+            logger.error(f"Evaluation job {job_id} failed: {e}", exc_info=True)
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE evaluation_jobs SET status = %s, error_message = %s WHERE eval_job_id = %s
+            """, ('failed', str(e), job_id))
+            conn.commit()
+            cursor.close()
+            conn.close()
+
     def process_job(self, job_data: Dict[str, Any]):
         """Process a job based on its type"""
         job_type = job_data.get("type", "single_camera")
@@ -388,6 +472,8 @@ class PipelineWorker:
             self.process_single_camera_job(job_data)
         elif job_type == "multi_camera":
             self.process_multi_camera_job(job_data)
+        elif job_type == "evaluation":
+            self.process_evaluation_job(job_data)
         else:
             logger.error(f"Unknown job type: {job_type}")
 

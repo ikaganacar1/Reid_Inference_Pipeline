@@ -118,12 +118,16 @@ class BatchReIDExtractor:
         self.use_tensorrt = use_tensorrt
         self.logger = logger or logging.getLogger(__name__)
         
-        # Initialize model - auto-detect TensorRT engine files
+        # Initialize model - auto-detect model format
         if model_path and model_path.endswith('.engine'):
             self.logger.info(f"Detected TensorRT engine file: {model_path}")
             self.model = self._load_tensorrt_model(model_path)
             self.inference_mode = 'tensorrt'
             self.use_tensorrt = True  # Auto-enable TensorRT for .engine files
+        elif model_path and model_path.endswith('.onnx'):
+            self.logger.info(f"Detected ONNX model file: {model_path}")
+            self.model = self._load_onnx_model(model_path)
+            self.inference_mode = 'onnx'
         elif model_path and model_path.endswith('.pth'):
             self.logger.info(f"Detected PyTorch model file: {model_path}")
             self.model = ReIDModel(embedding_dim=embedding_dim).to(self.device)
@@ -241,7 +245,72 @@ class BatchReIDExtractor:
             error_msg = f"Failed to load state dict from checkpoint: {e}"
             self.logger.error(error_msg)
             raise RuntimeError(error_msg) from e
-    
+
+    def _load_onnx_model(self, onnx_path: str):
+        """Load ONNX model with onnxruntime-gpu"""
+        try:
+            import onnxruntime as ort
+
+            # Check available providers
+            available_providers = ort.get_available_providers()
+            self.logger.info(f"Available ONNX Runtime providers: {available_providers}")
+
+            # Prefer CUDA, fall back to CPU
+            if 'CUDAExecutionProvider' in available_providers:
+                providers = [
+                    ('CUDAExecutionProvider', {
+                        'device_id': 0,
+                        'arena_extend_strategy': 'kNextPowerOfTwo',
+                        'cudnn_conv_algo_search': 'EXHAUSTIVE',
+                    }),
+                    'CPUExecutionProvider'
+                ]
+                self.logger.info("Using CUDA execution provider for ONNX Runtime")
+            else:
+                providers = ['CPUExecutionProvider']
+                self.logger.warning("CUDA not available, using CPU for ONNX Runtime")
+
+            # Create session
+            sess_options = ort.SessionOptions()
+            sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+            session = ort.InferenceSession(onnx_path, sess_options, providers=providers)
+
+            # Get input/output info
+            input_info = session.get_inputs()[0]
+            output_info = session.get_outputs()[0]
+
+            self.logger.info(f"ONNX Input: {input_info.name}, shape: {input_info.shape}")
+            self.logger.info(f"ONNX Output: {output_info.name}, shape: {output_info.shape}")
+
+            # Detect embedding dimension
+            output_shape = output_info.shape
+            if len(output_shape) >= 2:
+                detected_dim = output_shape[-1]
+                if isinstance(detected_dim, int) and detected_dim != self.embedding_dim:
+                    self.logger.warning(
+                        f"Embedding dimension mismatch! "
+                        f"ONNX outputs {detected_dim}D embeddings, "
+                        f"but config specifies {self.embedding_dim}D. "
+                        f"Using ONNX dimension: {detected_dim}"
+                    )
+                    self.embedding_dim = detected_dim
+
+            self.logger.info(f"✅ Loaded ONNX model from {onnx_path}")
+
+            return {
+                'session': session,
+                'input_name': input_info.name,
+                'output_name': output_info.name
+            }
+
+        except ImportError:
+            self.logger.error("onnxruntime not available. Install with: pip install onnxruntime-gpu")
+            raise
+        except Exception as e:
+            self.logger.error(f"Error loading ONNX model: {e}")
+            raise
+
     def _load_tensorrt_model(self, engine_path: str):
         """Load TensorRT engine"""
         try:
@@ -437,6 +506,8 @@ class BatchReIDExtractor:
                     sub_embeddings = self.model(sub_batch)
                 elif self.inference_mode == 'tensorrt':
                     sub_embeddings = self._tensorrt_inference(sub_batch)
+                elif self.inference_mode == 'onnx':
+                    sub_embeddings = self._onnx_inference(sub_batch)
                 else:
                     raise ValueError(f"Unknown inference mode: {self.inference_mode}")
             
@@ -499,7 +570,25 @@ class BatchReIDExtractor:
             # FIX: Pop context
             if hasattr(self, 'cuda_ctx'):
                 self.cuda_ctx.pop()
-                
+
+    def _onnx_inference(self, batch: torch.Tensor) -> torch.Tensor:
+        """Run inference using ONNX Runtime"""
+        session = self.model['session']
+        input_name = self.model['input_name']
+
+        # Convert to numpy
+        input_data = batch.cpu().numpy().astype(np.float32)
+
+        # Run inference
+        outputs = session.run(None, {input_name: input_data})
+        output = outputs[0]
+
+        # Convert back to tensor and normalize
+        embeddings = torch.from_numpy(output).to(self.device)
+        embeddings = nn.functional.normalize(embeddings, p=2, dim=1)
+
+        return embeddings
+
     def cleanup(self):
         """Explicitly clean up CUDA context."""
         if hasattr(self, 'cuda_ctx'):
@@ -573,10 +662,12 @@ class BatchReIDExtractor:
                     _ = self.model(dummy_input)
                 elif self.inference_mode == 'tensorrt':
                     _ = self._tensorrt_inference(dummy_input)
-        
+                elif self.inference_mode == 'onnx':
+                    _ = self._onnx_inference(dummy_input)
+
         if self.device.type == 'cuda':
             torch.cuda.synchronize()
-        
+
         self.logger.info("Warm-up complete")
     
     def export_to_onnx(self, output_path: str):

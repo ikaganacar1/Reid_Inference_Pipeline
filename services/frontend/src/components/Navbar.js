@@ -12,6 +12,7 @@ import ListIcon from '@mui/icons-material/List';
 import SettingsIcon from '@mui/icons-material/Settings';
 import CameraAltIcon from '@mui/icons-material/CameraAlt';
 import ViewModuleIcon from '@mui/icons-material/ViewModule';
+import AssessmentIcon from '@mui/icons-material/Assessment';
 
 // Styled navigation button with active state
 const NavButton = styled(Button)(({ theme, active }) => ({
@@ -121,6 +122,14 @@ function Navbar() {
             active={isActive('/jobs') ? 1 : 0}
           >
             Jobs
+          </NavButton>
+          <NavButton
+            component={RouterLink}
+            to="/datasets"
+            startIcon={<AssessmentIcon />}
+            active={isActive('/datasets') || isActive('/evaluation') ? 1 : 0}
+          >
+            Evaluation
           </NavButton>
           <NavButton
             component={RouterLink}

@@ -109,6 +109,7 @@ def test_trt_engine(engine_path: str):
 
 
 if __name__ == "__main__":
-    engine_path = "/home/ika/yzlm/Reid_Inference_Pipeline/models/lttc_0.1.4.49.engine"
+    #engine_path = "/home/ika/yzlm/Reid_Inference_Pipeline/models/lttc_0.1.4.49.engine"
+    engine_path = "/mnt/2tb_ssd/yzlm/Reid_Inference_Pipeline/models/lttc_0.1.4.49.engine"
     success = test_trt_engine(engine_path)
     sys.exit(0 if success else 1)
