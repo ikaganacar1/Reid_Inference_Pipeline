@@ -157,3 +157,7 @@ dmypy.json
 # Profiling
 *.prof
 *.lprof
+
+# AI
+.claude/
+CLAUDE.md
