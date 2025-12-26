@@ -1,0 +1,15 @@
+# Pipeline Configuration
+# Controls I/O, logging, and processing settings
+
+io:
+  save_visualization: true  # Save annotated output video
+  display: false  # Show live visualization (cv2.imshow)
+
+logging:
+  log_every_n_frames: 30  # Log performance metrics every N frames
+  save_crops: false  # Save person crops to disk (for debugging)
+  save_embeddings: false  # Save embeddings to disk (can be large)
+
+processing:
+  batch_size: 8  # Number of detections to batch for ReID inference
+  skip_frames: 0  # Process every Nth frame (0 = process all frames)

@@ -3,60 +3,157 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
+*.egg
 *.egg-info/
 dist/
 build/
+.eggs/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environments
 venv/
 env/
 ENV/
+.venv/
+conda_env/
 
-# IDEs
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE / Editors
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
 
-# Outputs
+# Model Files (large binary files)
+models/*.onnx
+models/*.pt
+models/*.pth
+models/*.engine
+models/*.plan
+models/*.pb
+models/*.trt
+models/*.weights
+
+# Triton Model Repository
+triton_models/*/1/*.onnx
+triton_models/*/1/*.plan
+triton_models/*/1/*.engine
+triton_models/*/1/*.trt
+triton_models/*/1/*_metadata.json
+triton_models/*/1/model_metadata.json
+
+# Experiment Outputs
+experiments/
 outputs/
-uploads/
+results/
+logs/
+runs/
+
+# Video Files
 *.mp4
 *.avi
 *.mov
 *.mkv
-*.pkl
+*.webm
+test_videos/*.mp4
+test_videos/*.avi
+
+# Images (if generating crops/frames)
 *.jpg
 *.jpeg
 *.png
-*.gif
+*.bmp
+*.tiff
 
-# Models
-*.pt
-*.pth
+# Data Files (images, videos, annotations)
+data/
+datasets/
+dataset/
+*.zip
+*.tar
+*.tar.gz
+*.rar
+*.7z
+
+# Checkpoints
+checkpoints/
+*.ckpt
+*.pth.tar
+
+# TensorRT
+*.trt
 *.engine
-*.onnx
-
-
-# Node
-node_modules/
-npm-debug.log
-yarn-error.log
-services/frontend/build/
-
-# Docker volumes
-postgres_data/
-redis_data/
-
-# Environment
-.env
-.env.local
+*.plan
+*.cache
 
 # Logs
 *.log
+*.jsonl
+*.csv
 
 # OS
 .DS_Store
 Thumbs.db
+*.swp
+*.swo
 
-*.md
-*.zip
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# Testing
+.pytest_cache/
+.tox/
+.nox/
+
+# Documentation builds
+docs/_build/
+site/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+*.orig
+
+# Keep directory structure but ignore contents
+!.gitkeep
+
+# Keep example configs and small test files
+!configs/*.yaml
+!scripts/*.py
+!scripts/*.sh
+
+# Keep README and documentation
+!README.md
+!*.md
+!docs/**/*.md
+
+# Keep small sample data if any
+!test_videos/.gitkeep
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Profiling
+*.prof
+*.lprof

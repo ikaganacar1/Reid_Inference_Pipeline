@@ -1,0 +1,23 @@
+# BoxMOT BoTSORT Tracker Configuration
+
+botsort:
+  # BoTSORT tracking parameters
+  track_high_thresh: 0.5
+  track_low_thresh: 0.1
+  new_track_thresh: 0.6
+  track_buffer: 30  # Number of frames to keep lost tracks
+  match_thresh: 0.8
+  proximity_thresh: 0.5
+  appearance_thresh: 0.25
+  fuse_first_associate: false
+
+  # ReID settings
+  with_reid: false  # Use external TAO embeddings
+  reid_weights: null  # Not using internal ReID model
+
+  # Camera motion compensation
+  cmc_method: "sparseOptFlow"  # or "orb", "ecc"
+
+# Device settings
+device: "cuda:0"
+fp16: true

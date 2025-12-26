@@ -1,0 +1,44 @@
+# Core dependencies for YOLO + TAO ReID + Triton Pipeline
+
+# Deep Learning Frameworks
+torch>=2.2.1
+torchvision>=0.17.1
+tensorrt>=8.6.0
+
+# Triton Inference Client
+tritonclient[all]>=2.64.0
+
+# Model Export & Deployment
+onnx>=1.20.0
+onnxruntime-gpu>=1.23.0
+
+# YOLO Detection
+ultralytics>=8.0.0
+
+# Multi-Object Tracking
+boxmot>=16.0.0
+
+# Image Processing
+opencv-python>=4.7.0
+pillow>=9.0.0
+
+# System Monitoring
+psutil>=5.9.0
+GPUtil>=1.4.0
+
+# Configuration & Logging
+pyyaml>=6.0
+loguru>=0.7.0
+
+# Data Processing
+numpy>=1.21.0
+pandas>=2.0.0
+
+# Utilities
+tqdm>=4.64.0
+click>=8.1.0
+
+# Optional: For development
+# ipython
+# jupyter
+# matplotlib

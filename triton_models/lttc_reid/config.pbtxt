@@ -1,0 +1,29 @@
+name: "lttc_reid"
+platform: "onnxruntime_onnx"
+max_batch_size: 16
+default_model_filename: "model.onnx"
+input [
+  {
+    name: "input"
+    data_type: TYPE_FP32
+    dims: [3, 384, 192]
+  }
+]
+output [
+  {
+    name: "fc_pred"
+    data_type: TYPE_FP32
+    dims: [256]
+    reshape { shape: [ 256 ] }
+  }
+]
+dynamic_batching {
+  preferred_batch_size: [1, 4, 8]
+  max_queue_delay_microseconds: 100
+}
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+  }
+]
