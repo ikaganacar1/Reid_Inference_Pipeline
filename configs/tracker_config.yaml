@@ -5,15 +5,29 @@ botsort:
   track_high_thresh: 0.5
   track_low_thresh: 0.1
   new_track_thresh: 0.6
-  track_buffer: 30  # Number of frames to keep lost tracks
+  # Number of frames to keep lost tracks alive for potential re-identification
+  # Set to very large value for unlimited memory - system remembers all people indefinitely
+  # Note: More lost tracks = more memory usage and slightly slower matching
+  track_buffer: 999999999  # Effectively unlimited - never forget a person
   match_thresh: 0.8
-  proximity_thresh: 0.5
-  appearance_thresh: 0.25
+
+  # CRITICAL for ReID: proximity_thresh controls whether appearance matching is used
+  # Default 0.5 requires IoU overlap for appearance matching (prevents re-ID after leaving frame)
+  # Set to 1.0 to allow appearance-only matching (enables re-ID when person re-enters at different location)
+  proximity_thresh: 1.0
+
+  # Appearance (embedding) distance threshold for ReID matching
+  # Lower = stricter matching (fewer false positives, may miss matches)
+  # Higher = more lenient (more matches, may have false positives)
+  # Cosine distance: 0 = identical, 1 = completely different
+  # Note: For long-term tracking with appearance changes, use higher values (0.4-0.5)
+  appearance_thresh: 0.45
+
   fuse_first_associate: false
 
   # ReID settings
-  with_reid: false  # Use external TAO embeddings
-  reid_weights: null  # Not using internal ReID model
+  with_reid: true  # Use external Triton embeddings for re-identification
+  reid_weights: null  # Not using internal ReID model (using Triton server)
 
   # Camera motion compensation
   cmc_method: "sparseOptFlow"  # or "orb", "ecc"

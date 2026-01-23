@@ -8,6 +8,26 @@ import torch
 from boxmot import BotSort
 
 
+class ExternalReIDBotSort(BotSort):
+    """
+    BotSort variant that uses external embeddings without loading an internal ReID model.
+
+    Standard BotSort requires reid_weights when with_reid=True, but we use external
+    embeddings from Triton. This class works around that by:
+    1. Initializing with with_reid=False (skips internal model loading)
+    2. Setting with_reid=True after init (enables embedding-based matching)
+    """
+
+    def __init__(self, with_reid=True, **kwargs):
+        # Store the intended with_reid setting
+        self._use_external_reid = with_reid
+        # Initialize parent with with_reid=False to skip internal model loading
+        super().__init__(with_reid=False, **kwargs)
+        # Enable embedding-based matching for external embeddings
+        if self._use_external_reid:
+            self.with_reid = True
+
+
 class ReIDTracker:
     """Multi-object tracker with external ReID embeddings"""
 
@@ -22,13 +42,14 @@ class ReIDTracker:
         self.device = torch.device(config.get('device', 'cuda:0'))
         self.fp16 = config.get('fp16', True)
 
-        # Initialize BoTSORT tracker
+        # Initialize BoTSORT tracker with external ReID support
         print("Initializing BoTSORT tracker...")
-        self.tracker = BotSort(
-            reid_weights=None,  # No internal ReID model
+        self.with_reid = self.config.get('with_reid', True)
+        self.tracker = ExternalReIDBotSort(
+            reid_weights=None,  # No internal ReID model - using external Triton embeddings
             device=self.device,
             half=self.fp16,
-            with_reid=False,  # Use external embeddings
+            with_reid=self.with_reid,  # Enable embedding-based matching for re-identification
             track_high_thresh=self.config['track_high_thresh'],
             track_low_thresh=self.config['track_low_thresh'],
             new_track_thresh=self.config['new_track_thresh'],
@@ -45,6 +66,7 @@ class ReIDTracker:
         print("  ✓ BoTSORT initialized")
         print(f"  Track buffer: {self.config['track_buffer']} frames")
         print(f"  Appearance threshold: {self.config['appearance_thresh']}")
+        print(f"  ReID enabled: {self.with_reid}")
 
     def update(self, detections: np.ndarray, frame: np.ndarray, embeddings: np.ndarray) -> np.ndarray:
         """
@@ -59,18 +81,19 @@ class ReIDTracker:
             tracks: [M, 7] array (x1, y1, x2, y2, track_id, conf, cls)
         """
         if len(detections) == 0:
-            # Update tracker with empty detections
-            tracks = self.tracker.update(np.empty((0, 6)), frame)
+            # Update tracker with empty detections (still pass embs to avoid internal model call)
+            tracks = self.tracker.update(np.empty((0, 6)), frame, embs=np.empty((0, 0)))
             return tracks
 
         # Prepare detections for BoxMOT: [x1, y1, x2, y2, conf, cls]
         dets = detections[:, :6]
 
         # Update tracker with external embeddings
-        if embeddings is not None and len(embeddings) > 0:
-            tracks = self.tracker.update(dets, frame, embs=embeddings)
-        else:
-            tracks = self.tracker.update(dets, frame)
+        # Always pass embs to avoid boxmot trying to use internal model
+        if embeddings is None or len(embeddings) == 0:
+            # Create dummy embeddings if none provided
+            embeddings = np.zeros((len(dets), 1024), dtype=np.float32)
+        tracks = self.tracker.update(dets, frame, embs=embeddings)
 
         # Update track history
         if len(tracks) > 0:
