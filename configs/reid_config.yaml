@@ -1,27 +1,34 @@
-triton:                                                                                                              
-  server_url: "localhost:8100"                                                                                       
-  model_name: "swin_base_reid"                                                                                       
-  model_version: "1"                                                                                                 
-  protocol: "http"                                                                                                   
-                                                                                                                     
-model:                                                                                                               
-  onnx_path: "models/swin_base_market1501_aicity156_featuredim1024.onnx"                                             
-  input_shape: [256, 128]                                                                                            
-  embedding_dim: 1024                                                                                                
-                                                                                                                     
-preprocessing:                                                                                                       
-  mean: [0.485, 0.456, 0.406]                                                                                        
-  std: [0.229, 0.224, 0.225]                                                                                         
-  color_space: "RGB"                                                                                                 
-  channel_order: "CHW"                                                                                               
-                                                                                                                     
-tensorrt:                                                                                                            
-  min_batch: 1                                                                                                       
-  opt_batch: 8                                                                                                       
-  max_batch: 16                                                                                                      
-  precision: "fp16"                                                                                                  
-  workspace_mb: 2048                                                                                                 
-                                                                                                                     
-inference:                                                                                                           
-  max_retry: 3                                                                                                       
-  timeout_ms: 5000     
+# TAO ReID Model Configuration with Triton Inference Server
+# Swin Base Transformer ReID - 1024 dim embeddings for highest accuracy
+
+triton:
+  server_url: "localhost:8100"  # HTTP endpoint
+  model_name: "swin_base_reid"
+  model_version: "1"
+  protocol: "http"  # or "grpc" on port 8101
+
+model:
+  onnx_path: "models/reidentificationnet_transformer_vdeployable_v1.0/swin_base_market1501_aicity156_featuredim1024.onnx"
+  input_shape: [256, 128]  # Height x Width (Swin Base standard)
+  embedding_dim: 1024  # Swin Base output dimension
+
+preprocessing:
+  # ImageNet normalization stats
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+
+  # Input format expectations
+  color_space: "RGB"  # TAO models expect RGB
+  channel_order: "CHW"  # Channels-Height-Width
+
+tensorrt:
+  min_batch: 1
+  opt_batch: 8
+  max_batch: 16
+  precision: "fp16"  # FP16 for Blackwell GPU
+  workspace_mb: 2048
+
+# Performance settings
+inference:
+  max_retry: 3
+  timeout_ms: 5000

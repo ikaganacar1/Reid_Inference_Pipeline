@@ -161,3 +161,6 @@ dmypy.json
 # AI
 .claude/
 CLAUDE.md
+
+*.tlt 
+*.onnx 
