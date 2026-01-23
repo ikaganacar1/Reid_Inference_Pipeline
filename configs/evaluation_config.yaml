@@ -1,0 +1,51 @@
+# Dataset Evaluation Configuration
+# For evaluating ReID model on Market1501-format datasets
+
+dataset:
+  # Root directory containing query/, bounding_box_test/, bounding_box_train/
+  root: "data"
+
+  # Dataset format: "market1501" or "ltcc"
+  # market1501: {pid}_{camid}_s{seqid}_{frame}.jpg
+  # ltcc: {pid}_{camid}s{seqid}_{frame}_{cloth}.jpg
+  format: "ltcc"
+
+  # Which splits to use
+  query_dir: "query"
+  gallery_dir: "bounding_box_test"
+
+  # Image file extension
+  extensions: [".jpg", ".png", ".jpeg"]
+
+evaluation:
+  # Batch size for embedding extraction (must match Triton model max_batch)
+  batch_size: 16
+
+  # Distance metric: "cosine" or "euclidean"
+  distance_metric: "cosine"
+
+  # CMC ranks to compute
+  cmc_ranks: [1, 5, 10, 20]
+
+  # Whether to exclude same-camera matches (standard Market1501 protocol)
+  exclude_same_camera: true
+
+  # Re-ranking (optional, can be slow for large galleries)
+  rerank:
+    enabled: false
+    k1: 20
+    k2: 6
+    lambda_value: 0.3
+
+output:
+  # Directory for evaluation results
+  results_dir: "experiments/evaluation"
+
+  # Save extracted embeddings for analysis
+  save_embeddings: true
+
+  # Save distance matrix (warning: can be large)
+  save_distance_matrix: false
+
+  # Generate per-query results
+  save_per_query_results: false
