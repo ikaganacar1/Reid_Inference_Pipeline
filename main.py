@@ -92,8 +92,8 @@ def validate_environment():
         import tensorrt as trt
         print(f"  ✓ TensorRT {trt.__version__}")
     except ImportError:
-        print("  ERROR: TensorRT not installed")
-        sys.exit(1)
+        print("  TensorRT not installed, ok for onnx")
+        #sys.exit(1)
 
     # Check Triton client
     try:

@@ -1,9 +1,9 @@
 # Core dependencies for YOLO + TAO ReID + Triton Pipeline
 
 # Deep Learning Frameworks
-torch>=2.2.1
-torchvision>=0.17.1
-tensorrt>=8.6.0
+#torch>=2.2.1
+#torchvision>=0.17.1
+#tensorrt>=8.6.0 # Seriosly problematic with pip
 
 # Triton Inference Client
 tritonclient[all]>=2.64.0
@@ -31,7 +31,7 @@ pyyaml>=6.0
 loguru>=0.7.0
 
 # Data Processing
-numpy>=1.21.0
+#numpy>=1.21.0
 pandas>=2.0.0
 
 # Utilities
@@ -39,6 +39,6 @@ tqdm>=4.64.0
 click>=8.1.0
 
 # Optional: For development
-# ipython
-# jupyter
-# matplotlib
+ipython
+jupyter
+matplotlib

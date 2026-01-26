@@ -31,6 +31,7 @@ class TritonReIDClient:
         self.mean = np.array(config['preprocessing']['mean'], dtype=np.float32)
         self.std = np.array(config['preprocessing']['std'], dtype=np.float32)
         self.input_shape = config['model']['input_shape']  # [H, W]
+        self.embedding_dim = config['model']['embedding_dim']  # Embedding dimension
 
         # Create Triton client
         try:
@@ -143,7 +144,7 @@ class TritonReIDClient:
                 embeddings = response.as_numpy("fc_pred")
 
                 # Validate output shape
-                expected_shape = (batch_size, 256)
+                expected_shape = (batch_size, self.embedding_dim)
                 if embeddings.shape != expected_shape:
                     raise ValueError(
                         f"Unexpected output shape: {embeddings.shape}, expected {expected_shape}"
