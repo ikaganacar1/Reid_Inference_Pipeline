@@ -46,6 +46,7 @@ def load_all_configs(config_dir: Path = None) -> Dict[str, Any]:
     # Load individual configs
     config_files = {
         "yolo": config_dir / "yolo_config.yaml",
+        "yoloe": config_dir / "yoloe_config.yaml",
         "reid": config_dir / "reid_config.yaml",
         "tracker": config_dir / "tracker_config.yaml",
         "pipeline": config_dir / "pipeline_config.yaml"
