@@ -4,10 +4,9 @@
 model:
   path: "models/yoloe-26x-seg.pt"
   device: "cuda:0"
-  # Text prompts: describe what to detect in natural language.
-  # For intruder detection in a home security context we detect "person".
-  # Could be extended to "person wearing dark clothes", "person carrying bag", etc.
-  text_prompts: ["person"]
+  # Two-class open-vocabulary detection.
+  # YOLOE uses CLIP to classify each detected box as one of these labels.
+  text_prompts: ["person", "intruder"]
 
 detection:
   conf_threshold: 0.4   # slightly lower than yolo11n — YOLOE is more conservative
