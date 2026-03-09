@@ -20,6 +20,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.detector import YOLOPersonDetector
 from src.yoloe_detector import YOLOEPersonDetector
 from src.reid_client import TritonReIDClient
 from src.tracker import ReIDTracker
@@ -103,21 +104,27 @@ def draw_hud(frame, prompts, frame_idx, fps, n_tracks):
 
 
 def h264_encode(src: Path, dst: Path):
-    ffmpeg = next((p for p in ["/home/ika/miniconda3/bin/ffmpeg",
-                                "/usr/local/bin/ffmpeg", "ffmpeg"]
+    ffmpeg = next((p for p in ["/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg", "ffmpeg"]
                    if Path(p).exists() or p == "ffmpeg"), "ffmpeg")
-    subprocess.run([ffmpeg, "-y", "-i", str(src),
-                    "-c:v", "libopenh264", "-b:v", "6M", "-pix_fmt", "yuv420p",
-                    str(dst)], check=True)
-    src.unlink()
+    for codec in ["h264_nvenc", "libx264", "libopenh264"]:
+        try:
+            subprocess.run([ffmpeg, "-y", "-i", str(src),
+                            "-c:v", codec, "-b:v", "6M", "-pix_fmt", "yuv420p",
+                            str(dst)], check=True, capture_output=True)
+            src.unlink()
+            return
+        except subprocess.CalledProcessError:
+            continue
+    src.rename(dst)
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="YOLOE single-video inference")
+    parser = argparse.ArgumentParser(description="Single-video inference")
     parser.add_argument("--video",   required=True, help="Input video path")
-    parser.add_argument("--output",  default=None,  help="Output video path (default: outputs/<name>_yoloe.mp4)")
+    parser.add_argument("--detector", choices=["yolo11n", "yoloe"], default="yolo11n")
+    parser.add_argument("--output",  default=None,  help="Output video path (default: outputs/<name>_<det>.mp4)")
     parser.add_argument("--no-reid", action="store_true", help="Skip ReID — tracking by IoU only")
     parser.add_argument("--max-frames", type=int, default=None, help="Limit frames for quick testing")
     args = parser.parse_args()
@@ -128,17 +135,19 @@ def main():
         sys.exit(1)
 
     configs = load_all_configs()
-    prompts = configs['yoloe']['model']['text_prompts']
+    is_yoloe = args.detector == "yoloe"
+    prompts = configs['yoloe']['model']['text_prompts'] if is_yoloe else ["person"]
 
     Path("outputs").mkdir(exist_ok=True)
     if args.output:
         out_path = Path(args.output)
     else:
-        out_path = Path("outputs") / f"{video_path.stem}_yoloe.mp4"
+        suffix = "yoloe" if is_yoloe else "yolo11n"
+        out_path = Path("outputs") / f"{video_path.stem}_{suffix}.mp4"
     tmp_path = out_path.with_suffix('.raw.mp4')
 
     print("=" * 55)
-    print(f" YOLOE Inference")
+    print(f" {args.detector.upper()} Inference")
     print(f"  Video  : {video_path}")
     print(f"  Output : {out_path}")
     print(f"  Prompts: {prompts}")
@@ -147,7 +156,10 @@ def main():
 
     # ── Init ──────────────────────────────────────────────────────────────
     print("\nLoading models...")
-    detector = YOLOEPersonDetector(configs['yoloe'])
+    if is_yoloe:
+        detector = YOLOEPersonDetector(configs['yoloe'])
+    else:
+        detector = YOLOPersonDetector(configs['yolo'])
 
     reid_client = None
     if not args.no_reid:
@@ -179,7 +191,11 @@ def main():
             break
 
         t_d = time.time()
-        dets, crops, masks = detector.detect(frame)
+        if is_yoloe:
+            dets, crops, masks = detector.detect(frame)
+        else:
+            dets, crops = detector.detect(frame)
+            masks = [None] * len(dets)
         det_times.append(time.time() - t_d)
         total_dets += len(dets)
 

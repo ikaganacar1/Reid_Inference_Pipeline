@@ -8,7 +8,7 @@ triton:
   protocol: "http"  # or "grpc" on port 8101
 
 model:
-  onnx_path: "models/reidentificationnet_transformer_vdeployable_v1.0/swin_base_market1501_aicity156_featuredim1024.onnx"
+  onnx_path: "models/swin_base_reid.onnx"
   input_shape: [256, 128]  # Height x Width (Swin Base standard)
   embedding_dim: 1024  # Swin Base output dimension
 

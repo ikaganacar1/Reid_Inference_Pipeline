@@ -132,13 +132,20 @@ def resize_pane(f):
 
 
 def h264_encode(src: Path, dst: Path):
-    ffmpeg = next((p for p in ["/home/ika/miniconda3/bin/ffmpeg",
-                                "/usr/local/bin/ffmpeg", "ffmpeg"]
+    ffmpeg = next((p for p in ["/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg", "ffmpeg"]
                    if Path(p).exists() or p == "ffmpeg"), "ffmpeg")
-    subprocess.run([ffmpeg, "-y", "-i", str(src),
-                    "-c:v", "libopenh264", "-b:v", "4M", "-pix_fmt", "yuv420p",
-                    str(dst)], check=True)
-    src.unlink()
+    # Try h264_nvenc (GPU), then libx264 (CPU), then libopenh264
+    for codec in ["h264_nvenc", "libx264", "libopenh264"]:
+        try:
+            subprocess.run([ffmpeg, "-y", "-i", str(src),
+                            "-c:v", codec, "-b:v", "4M", "-pix_fmt", "yuv420p",
+                            str(dst)], check=True, capture_output=True)
+            src.unlink()
+            return
+        except subprocess.CalledProcessError:
+            continue
+    # Fallback: just rename raw file
+    src.rename(dst)
 
 
 # ─── Pipeline ──────────────────────────────────────────────────────────────────

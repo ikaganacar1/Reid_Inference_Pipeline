@@ -87,7 +87,7 @@ echo "=================================================="
 # Check model status
 echo ""
 echo "Model status:"
-curl -s http://localhost:$HTTP_PORT/v2/models/lttc_reid | python3 -m json.tool || echo "WARNING: Model lttc_reid not loaded"
+curl -s http://localhost:$HTTP_PORT/v2/models/swin_base_reid | python3 -m json.tool || echo "WARNING: Model swin_base_reid not loaded"
 
 echo ""
 echo "=================================================="

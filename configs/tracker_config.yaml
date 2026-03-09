@@ -9,7 +9,7 @@ botsort:
   # Set to very large value for unlimited memory - system remembers all people indefinitely
   # Note: More lost tracks = more memory usage and slightly slower matching
   track_buffer: 999999999  # Effectively unlimited - never forget a person
-  match_thresh: 0.8
+  match_thresh: 0.85
 
   # CRITICAL for ReID: proximity_thresh controls whether appearance matching is used
   # Default 0.5 requires IoU overlap for appearance matching (prevents re-ID after leaving frame)
@@ -21,7 +21,7 @@ botsort:
   # Higher = more lenient (more matches, may have false positives)
   # Cosine distance: 0 = identical, 1 = completely different
   # Note: For long-term tracking with appearance changes, use higher values (0.4-0.5)
-  appearance_thresh: 0.45
+  appearance_thresh: 0.75
 
   fuse_first_associate: false
 
