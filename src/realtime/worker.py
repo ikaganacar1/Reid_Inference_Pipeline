@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from pathlib import Path
 from typing import Any
 
 import aiohttp
 import cv2
-import yaml
 
 from src.detector import YOLOPersonDetector
 from src.realtime.protocol import encode_jpeg, pack_frame
-from src.utils.config_loader import load_config
+from src.runtime_config import (
+    load_realtime_config,
+    load_yolo_config as load_runtime_yolo_config,
+)
 
 
 class RealtimeWorker:
@@ -153,21 +154,21 @@ class RealtimeWorker:
         return cap
 
 
-def load_worker_config(config_path: Path, camera_id: str | None = None, source: str | None = None) -> dict[str, Any]:
-    with config_path.open("r") as f:
-        config = yaml.safe_load(f)
+def load_worker_config(
+    config_path: Path,
+    camera_id: str | None = None,
+    source: str | None = None,
+) -> dict[str, Any]:
+    config = load_realtime_config(config_path)
 
     if camera_id is not None:
         config["worker"]["camera_id"] = camera_id
     if source is not None:
         config["worker"]["source"] = int(source) if source.isdigit() else source
-    prime_url = os.environ.get("PRIME_URL")
-    if prime_url:
-        config["network"]["prime_url"] = prime_url
     return config
 
 
 def load_yolo_config(config_path: Path) -> dict[str, Any]:
     if config_path.is_dir():
         config_path = config_path / "yolo_config.yaml"
-    return load_config(config_path)
+    return load_runtime_yolo_config(config_path)

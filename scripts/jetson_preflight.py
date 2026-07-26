@@ -25,6 +25,16 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.runtime_config import (  # noqa: E402
+    load_reid_config,
+    load_realtime_config,
+    load_runtime_environment,
+    load_tracker_config,
+    load_yolo_config,
+    pipeline_role,
+    runtime_paths,
+)
+
 
 @dataclass
 class Check:
@@ -36,10 +46,11 @@ class Check:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--role", choices=["prime", "worker"], required=True)
+    parser.add_argument("--env-file", type=Path)
+    parser.add_argument("--role", choices=["prime", "worker"])
     parser.add_argument("--realtime-config", type=Path)
-    parser.add_argument("--reid-config", type=Path, default=Path("configs/reid_config.yaml"))
-    parser.add_argument("--tracker-config", type=Path, default=Path("configs/tracker_config.yaml"))
+    parser.add_argument("--reid-config", type=Path)
+    parser.add_argument("--tracker-config", type=Path)
     parser.add_argument("--yolo-config", type=Path)
     parser.add_argument("--load-models", action="store_true")
     parser.add_argument("--check-camera", action="store_true")
@@ -47,7 +58,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-manifest",
         type=Path,
-        default=Path("deploy/model_manifest.yaml"),
     )
     parser.add_argument("--skip-model-hash", action="store_true")
     parser.add_argument("--json", action="store_true", dest="json_output")
@@ -255,8 +265,8 @@ def check_prime(
     model_manifest: dict[str, Any],
     skip_model_hash: bool,
 ) -> None:
-    reid_config = load_yaml(reid_config_path)
-    tracker_config = load_yaml(tracker_config_path)
+    reid_config = load_reid_config(reid_config_path)
+    tracker_config = load_tracker_config(tracker_config_path)
     add_import_check(checks, "boxmot")
     ort = add_import_check(checks, "onnxruntime")
     if ort is not None:
@@ -380,7 +390,7 @@ def check_worker(
     skip_model_hash: bool,
 ) -> None:
     add_import_check(checks, "ultralytics")
-    yolo_config = load_yaml(yolo_config_path)
+    yolo_config = load_yolo_config(yolo_config_path)
     model_path = resolve_yolo_model_path(yolo_config)
     checks.append(Check("yolo_model", model_path.is_file(), str(model_path)))
     check_model_integrity(checks, "yolo", model_path, model_manifest, skip_model_hash)
@@ -439,12 +449,15 @@ def check_worker(
 
 def run_preflight(args: argparse.Namespace) -> list[Check]:
     os.chdir(ROOT)
-    realtime_path = args.realtime_config or Path(
-        "configs/realtime_config.yaml" if args.role == "prime" else "configs/realtime_config.worker.yaml"
-    )
-    yolo_path = args.yolo_config or Path(
-        "configs/yolo_config.yaml" if args.role == "prime" else "configs/yolo_config.worker.yaml"
-    )
+    # --role selects the component being checked. PIPELINE_ROLE selects this
+    # device's config profile, so a prime's local camera still uses cam1.
+    config_role = os.environ.get("PIPELINE_ROLE") or args.role
+    paths = runtime_paths(config_role)
+    realtime_path = args.realtime_config or paths.realtime
+    yolo_path = args.yolo_config or paths.yolo
+    reid_path = args.reid_config or paths.reid
+    tracker_path = args.tracker_config or paths.tracker
+    model_manifest_path = args.model_manifest or paths.model_manifest
     checks: list[Check] = []
     is_jetson = check_platform(checks, args.allow_non_jetson)
     check_clock_sync(checks, required=is_jetson)
@@ -453,15 +466,15 @@ def run_preflight(args: argparse.Namespace) -> list[Check]:
     check_torch_cuda(checks)
 
     try:
-        realtime_config = load_yaml(realtime_path)
+        realtime_config = load_realtime_config(realtime_path)
         checks.append(Check("realtime_config", True, str(realtime_path.resolve())))
     except Exception as exc:
         checks.append(Check("realtime_config", False, f"{type(exc).__name__}: {exc}"))
         return checks
 
     try:
-        model_manifest = load_yaml(args.model_manifest)
-        checks.append(Check("model_manifest", True, str(args.model_manifest.resolve())))
+        model_manifest = load_yaml(model_manifest_path)
+        checks.append(Check("model_manifest", True, str(model_manifest_path.resolve())))
     except Exception as exc:
         checks.append(Check("model_manifest", False, f"{type(exc).__name__}: {exc}"))
         return checks
@@ -470,8 +483,8 @@ def run_preflight(args: argparse.Namespace) -> list[Check]:
         check_prime(
             checks,
             realtime_config,
-            args.reid_config,
-            args.tracker_config,
+            reid_path,
+            tracker_path,
             args.load_models,
             model_manifest,
             args.skip_model_hash,
@@ -491,6 +504,8 @@ def run_preflight(args: argparse.Namespace) -> list[Check]:
 
 def main() -> None:
     args = parse_args()
+    load_runtime_environment(args.env_file)
+    args.role = pipeline_role(args.role)
     checks = run_preflight(args)
     failed = [check for check in checks if check.required and not check.ok]
     if args.json_output:

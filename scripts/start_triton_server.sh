@@ -3,10 +3,14 @@
 
 set -e
 
+cd "$(dirname "$0")/.."
+source scripts/runtime_env.sh
+load_runtime_env
+
 # Configuration
 TRITON_IMAGE="${TRITON_IMAGE:-nvcr.io/nvidia/tritonserver:25.04-py3-igpu}"
-CONTAINER_NAME="triton-reid-server"
-MODEL_REPO="$(pwd)/triton_models"
+CONTAINER_NAME="${TRITON_CONTAINER_NAME:-triton-reid-server}"
+MODEL_REPO="${TRITON_MODEL_REPOSITORY:-$(pwd)/triton_models}"
 MODEL_NAME="${TRITON_MODEL_NAME:-generalized_reid_swin}"
 GPU_RUNTIME_ARGS=()
 if [ -n "${TRITON_DOCKER_GPU_ARGS:-}" ]; then
@@ -17,9 +21,9 @@ else
     # Jetson/iGPU Triton images require the NVIDIA runtime directly.
     GPU_RUNTIME_ARGS=(--runtime=nvidia)
 fi
-HTTP_PORT=8100
-GRPC_PORT=8101
-METRICS_PORT=8102
+HTTP_PORT="${TRITON_HTTP_PORT:-8100}"
+GRPC_PORT="${TRITON_GRPC_PORT:-8101}"
+METRICS_PORT="${TRITON_METRICS_PORT:-8102}"
 MAX_RETRIES="${TRITON_STARTUP_RETRIES:-120}"
 
 echo "=================================================="

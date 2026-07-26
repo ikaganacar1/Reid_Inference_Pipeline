@@ -17,13 +17,15 @@ import aiohttp
 from aiohttp import web
 import cv2
 import numpy as np
-import yaml
 
 from src.realtime.identity_assignment import GlobalIdentityAssigner
 from src.realtime.protocol import FramePacket, decode_jpeg, encode_jpeg, unpack_frame
 from src.reid_client import create_reid_client
+from src.runtime_config import (
+    load_prime_pipeline_configs as load_runtime_pipeline_configs,
+    load_realtime_config as load_runtime_realtime_config,
+)
 from src.tracker import ReIDTracker
-from src.utils.config_loader import load_all_configs
 
 
 class RealtimePrimeServer:
@@ -751,12 +753,11 @@ class RealtimePrimeServer:
 
 
 def load_realtime_config(path: Path) -> dict[str, Any]:
-    with path.open("r") as f:
-        return yaml.safe_load(f)
+    return load_runtime_realtime_config(path)
 
 
 def load_prime_pipeline_configs(config_dir: Path) -> dict[str, Any]:
-    return load_all_configs(config_dir)
+    return load_runtime_pipeline_configs(config_dir)
 
 
 VIEWER_HTML = """<!doctype html>

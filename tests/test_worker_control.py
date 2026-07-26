@@ -85,3 +85,44 @@ def test_start_on_launch_and_retry_are_loaded(tmp_path: Path):
 
     assert control.auto_start_enabled is True
     assert control.auto_start_retry_seconds == 2.5
+
+
+def test_public_status_redacts_camera_url_credentials(tmp_path: Path):
+    control = RealtimeWorkerControl(control_config(), tmp_path)
+    userinfo = ":".join(("camera-user", "camera-pass"))
+    credentialed_source = f"rtsp://{userinfo}@camera.local/stream"
+    control.sources = [credentialed_source]
+    control.worker_processes = lambda include_launcher=False: [
+        {
+            "pid": 42,
+            "cmd": (
+                "python scripts/realtime_worker.py --source "
+                f"{credentialed_source}"
+            ),
+        }
+    ]
+    control.discover_sources = lambda: control.sources
+    control.tail_logs = lambda: {}
+    control.worker_metrics = lambda: {}
+
+    status = control.status()
+
+    assert "camera-user" not in status["sources"][0]
+    assert "camera-pass" not in status["workers"][0]["cmd"]
+    assert "rtsp://***@camera.local/stream" in status["sources"][0]
+
+
+def test_metrics_support_non_cam_prefixed_camera_ids(tmp_path: Path):
+    control = RealtimeWorkerControl(control_config(), tmp_path)
+    control.log_dir.mkdir(parents=True)
+    (control.log_dir / "entrance.log").write_text(
+        "camera=entrance frame=120 detections=2 sent_fps=9.75\n"
+    )
+    (control.log_dir / "control.log").write_text(
+        "camera=wrong frame=999 detections=9 sent_fps=1.0\n"
+    )
+
+    metrics = control.worker_metrics()
+
+    assert metrics["entrance"]["frame_id"] == 120
+    assert "wrong" not in metrics

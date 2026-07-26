@@ -69,43 +69,55 @@ fail-fast preflight, model staging, and systemd services.
 
 ## Start The System
 
-On the prime Jetson, start the centralized server and its local camera control:
+Create one private `.env` on each device. The file is ignored by Git and is the
+only file operators normally edit.
 
 ```bash
-cd ~/Desktop/Reid_Inference_Pipeline
-scripts/start_prime_dashboard.sh
-scripts/start_worker_control.sh prime
+# Prime Jetson
+scripts/reidctl.sh init prime
+
+# Worker Jetson
+scripts/reidctl.sh init worker
 ```
 
-On the worker Jetson, use the worker profile:
+Edit `.env` on each device. At minimum:
+
+```dotenv
+# Prime
+PIPELINE_ROLE=prime
+PRIME_URL=ws://<prime-lan-ip>:8765
+CAMERA_IDS=cam1
+REID_MODEL_PATH=~/TwinProject_models/reid_generalized_yolo11n/generalized_reid_swin_epoch119.onnx
+YOLO_MODEL_PATH=~/TwinProject_models/reid_generalized_yolo11n/yolo26m.pt
+
+# Worker
+PIPELINE_ROLE=worker
+PRIME_URL=ws://<prime-lan-ip>:8765
+CAMERA_IDS=cam2
+YOLO_MODEL_PATH=~/TwinProject_models/reid_generalized_yolo11n/yolo26m.pt
+```
+
+Then run the same commands on both devices:
 
 ```bash
-cd ~/Desktop/Reid_Inference_Pipeline
-scripts/start_worker_control.sh worker
+scripts/reidctl.sh smoke --load-models
+scripts/reidctl.sh start
+scripts/reidctl.sh status
 ```
 
-Open the dashboard from a LAN/Tailscale client:
-
-```text
-http://<prime-lan-ip>:8765/
-```
-
-The dashboard can start, stop, or scan/restart either configured worker node.
-The same operations are available from each worker control API on port `8787`.
-
-Stop commands:
+Open `http://<prime-lan-ip>:8765/` from a LAN client. Stop or restart either
+device with:
 
 ```bash
-scripts/stop_worker_control.sh
-scripts/stop_prime_dashboard.sh
+scripts/reidctl.sh stop
+scripts/reidctl.sh restart
 ```
 
 The control service automatically scans and starts its configured camera, then
-retries if the camera or worker process is unavailable. The launch scripts use
-`nohup` for manual operation and load
-`~/.config/reid-pipeline/jetson.env` when it exists. For unattended operation,
-install the prepared systemd user services described in
-`docs/JETSON_DEPLOYMENT.md`.
+retries if the camera or worker process is unavailable. The dashboard can also
+start, stop, or scan/restart every node listed in `WORKER_NODES`. For unattended
+operation, install the systemd user services described in
+`docs/JETSON_DEPLOYMENT.md`; those services read the same `.env`.
 
 ## Camera Discovery And Reconnect
 

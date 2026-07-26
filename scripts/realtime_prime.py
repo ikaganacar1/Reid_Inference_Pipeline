@@ -3,6 +3,7 @@
 
 import argparse
 import asyncio
+import os
 from pathlib import Path
 import sys
 
@@ -13,18 +14,23 @@ from src.realtime.prime_server import (
     load_prime_pipeline_configs,
     load_realtime_config,
 )
+from src.runtime_config import ROOT, load_runtime_environment, runtime_paths
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Realtime prime ReID server")
-    parser.add_argument("--config", type=Path, default=Path("configs/realtime_config.yaml"))
-    parser.add_argument("--config-dir", type=Path, default=Path("configs"))
+    parser.add_argument("--env-file", type=Path)
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--config-dir", type=Path)
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    realtime_config = load_realtime_config(args.config)
+    os.chdir(ROOT)
+    load_runtime_environment(args.env_file)
+    paths = runtime_paths("prime", args.config_dir)
+    realtime_config = load_realtime_config(args.config or paths.realtime)
     pipeline_configs = load_prime_pipeline_configs(args.config_dir)
     server = RealtimePrimeServer(realtime_config, pipeline_configs)
     asyncio.run(server.run())

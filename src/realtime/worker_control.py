@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import re
 import shlex
 import subprocess
@@ -12,7 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from aiohttp import web
-import yaml
+
+from src.runtime_config import load_realtime_config, redact_url
 
 
 class RealtimeWorkerControl:
@@ -35,7 +37,10 @@ class RealtimeWorkerControl:
         self.configured_camera_ids = [str(s) for s in self.worker_control.get("camera_ids", [])]
         if len(set(self.configured_camera_ids)) != len(self.configured_camera_ids):
             raise ValueError("control.worker.camera_ids must be unique")
-        self.log_dir = self.repo_dir / "outputs" / "realtime_worker_logs"
+        log_root = Path(os.environ.get("RUNTIME_LOG_DIR", "outputs")).expanduser()
+        if not log_root.is_absolute():
+            log_root = self.repo_dir / log_root
+        self.log_dir = log_root / "realtime_worker_logs"
 
     async def run(self) -> None:
         app = web.Application()
@@ -127,7 +132,7 @@ class RealtimeWorkerControl:
             return {
                 "ok": False,
                 "message": mapping_error,
-                "sources": self.sources,
+                "sources": self.public_sources(self.sources),
                 "configured_camera_ids": self.configured_camera_ids,
             }
 
@@ -147,7 +152,7 @@ class RealtimeWorkerControl:
         return {
             "ok": True,
             "message": "workers starting",
-            "sources": self.sources,
+            "sources": self.public_sources(self.sources),
             "camera_ids": camera_ids,
         }
 
@@ -158,7 +163,11 @@ class RealtimeWorkerControl:
         time.sleep(0.5)
         self.run_shell(["pkill", "-KILL", "-f", "[r]ealtime_worker.py"])
         self.run_shell(["pkill", "-KILL", "-f", "[s]tart_4_realtime_workers"])
-        return {"ok": True, "message": "workers stopped", "previous": before}
+        return {
+            "ok": True,
+            "message": "workers stopped",
+            "previous": self.public_workers(before),
+        }
 
     def status(self) -> dict[str, Any]:
         workers = self.worker_processes()
@@ -167,15 +176,29 @@ class RealtimeWorkerControl:
             "running": len(workers) > 0,
             "auto_start_enabled": self.auto_start_enabled,
             "worker_count": len(workers),
-            "workers": workers,
-            "sources": self.sources,
+            "workers": self.public_workers(workers),
+            "sources": self.public_sources(self.sources),
             "camera_ids": self.camera_ids_for_sources(),
             "configured_camera_ids": self.configured_camera_ids,
             "source_mapping_error": self.source_mapping_error(discovered_sources),
-            "discovered_sources": discovered_sources,
+            "discovered_sources": self.public_sources(discovered_sources),
             "logs": self.tail_logs(),
             "metrics": self.worker_metrics(),
         }
+
+    @staticmethod
+    def public_sources(sources: list[str]) -> list[str]:
+        return [redact_url(str(source)) for source in sources]
+
+    @staticmethod
+    def public_workers(workers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                **worker,
+                "cmd": redact_url(str(worker.get("cmd", ""))),
+            }
+            for worker in workers
+        ]
 
     def camera_ids_for_sources(self, sources: list[str] | None = None) -> list[str]:
         """Return stable camera IDs for the sources on this Jetson."""
@@ -256,7 +279,7 @@ class RealtimeWorkerControl:
 
     def tail_logs(self) -> dict[str, list[str]]:
         logs = {}
-        for path in sorted(self.log_dir.glob("cam*.log")):
+        for path in self.camera_log_paths():
             try:
                 logs[path.name] = path.read_text(errors="replace").splitlines()[-5:]
             except OSError:
@@ -266,7 +289,7 @@ class RealtimeWorkerControl:
     def worker_metrics(self) -> dict[str, dict[str, Any]]:
         metrics = {}
         pattern = re.compile(r"camera=(\S+) frame=(\d+) detections=(\d+) sent_fps=([0-9.]+)")
-        for path in sorted(self.log_dir.glob("cam*.log")):
+        for path in self.camera_log_paths():
             try:
                 lines = path.read_text(errors="replace").splitlines()
             except OSError:
@@ -284,11 +307,17 @@ class RealtimeWorkerControl:
                     break
         return metrics
 
+    def camera_log_paths(self) -> list[Path]:
+        return [
+            path
+            for path in sorted(self.log_dir.glob("*.log"))
+            if path.name not in {"control.log", "launcher.log"}
+        ]
+
     @staticmethod
     def run_shell(command: list[str]) -> None:
         subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
 
 def load_control_config(path: Path) -> dict[str, Any]:
-    with path.open("r") as f:
-        return yaml.safe_load(f)
+    return load_realtime_config(path)

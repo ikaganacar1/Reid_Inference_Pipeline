@@ -73,23 +73,29 @@ not silently accept CPU ReID.
 
 ## 3. Prepare Per-Device Environment
 
-Install the service files without enabling them:
+Create the private repository-local `.env`:
 
 ```bash
 # Prime Jetson
-scripts/install_jetson_services.sh prime
+scripts/reidctl.sh init prime
 
 # Worker Jetson
-scripts/install_jetson_services.sh worker
+scripts/reidctl.sh init worker
 ```
 
-Edit `~/.config/reid-pipeline/jetson.env` on each device.
+Edit `.env` on each device. It is ignored by Git and created with mode `0600`.
+All normal runtime settings, config paths, camera assignments, model paths,
+network endpoints, recording settings, and primary ReID thresholds are defined
+there.
 
 Prime example:
 
-```bash
-REID_MODEL_PATH="${HOME}/TwinProject_models/reid_generalized_yolo11n/generalized_reid_swin_epoch119.onnx"
-YOLO_MODEL_PATH="${HOME}/TwinProject_models/reid_generalized_yolo11n/yolo26m.pt"
+```dotenv
+PIPELINE_ROLE=prime
+LOCAL_CAMERA_ENABLED=true
+CAMERA_IDS=cam1
+REID_MODEL_PATH=~/TwinProject_models/reid_generalized_yolo11n/generalized_reid_swin_epoch119.onnx
+YOLO_MODEL_PATH=~/TwinProject_models/reid_generalized_yolo11n/yolo26m.pt
 PRIME_URL=ws://192.0.2.10:8765
 REALTIME_OUTPUT_DIR=/mnt/recordings/reid
 RECORDING_MOUNTPOINT=/mnt/recordings
@@ -98,15 +104,15 @@ RECORDING_MIN_FREE_GB=5
 
 Worker example:
 
-```bash
-YOLO_MODEL_PATH="${HOME}/TwinProject_models/reid_generalized_yolo11n/yolo26m.pt"
+```dotenv
+PIPELINE_ROLE=worker
+CAMERA_IDS=cam2
+YOLO_MODEL_PATH=~/TwinProject_models/reid_generalized_yolo11n/yolo26m.pt
 PRIME_URL=ws://192.0.2.10:8765
 ```
 
-The environment file is device-local and should not be committed.
 `192.0.2.10` is a documentation-only address; replace it with the prime
 device's LAN address.
-Omit `REALTIME_OUTPUT_DIR` to use `outputs/realtime` inside the repository.
 Preflight verifies that the chosen directory is writable and has the configured
 free-space reserve. When external storage is used, set `RECORDING_MOUNTPOINT`;
 startup then fails rather than writing to the root filesystem if that mount is
@@ -114,35 +120,19 @@ missing or the output path is outside it.
 
 ## 4. Run Fail-Fast Preflight
 
-Prime inference and tracker:
+First run the application smoke test. It validates `.env`, all selected YAML
+files, typed overrides, packet serialization, a localhost WebSocket round trip,
+global gallery behavior, and real model inference on the GPU:
 
 ```bash
-set -a
-source ~/.config/reid-pipeline/jetson.env
-set +a
-scripts/with_onnxruntime_cuda_env.sh \
-  .venv-jetson/bin/python scripts/jetson_preflight.py \
-  --role prime --load-models
+scripts/reidctl.sh smoke --load-models
 ```
 
-Prime's local camera worker:
+Then run the Jetson-specific model-integrity, CUDA, storage, clock, and camera
+checks:
 
 ```bash
-.venv-jetson/bin/python scripts/jetson_preflight.py \
-  --role worker \
-  --realtime-config configs/realtime_config.yaml \
-  --yolo-config configs/yolo_config.yaml \
-  --load-models --check-camera
-```
-
-Second Orin worker:
-
-```bash
-.venv-jetson/bin/python scripts/jetson_preflight.py \
-  --role worker \
-  --realtime-config configs/realtime_config.worker.yaml \
-  --yolo-config configs/yolo_config.worker.yaml \
-  --load-models --check-camera
+scripts/reidctl.sh preflight
 ```
 
 Every required line must report `PASS`. In particular, verify:
@@ -158,7 +148,7 @@ Every required line must report `PASS`. In particular, verify:
 
 ## 5. Enable Boot Services
 
-After preflight passes:
+After both checks pass, render and enable services from the same `.env`:
 
 ```bash
 # Run on each device with its own role.
@@ -169,10 +159,13 @@ scripts/install_jetson_services.sh worker --enable  # worker only
 sudo loginctl enable-linger "$USER"
 ```
 
-The prime role installs two independent services:
+With `LOCAL_CAMERA_ENABLED=true`, the prime role installs two independent
+services:
 
 - `reid-prime.service`
 - `reid-camera.service`
+
+With `LOCAL_CAMERA_ENABLED=false`, only `reid-prime.service` is installed.
 
 The worker role installs `reid-camera.service`. Camera control starts at boot,
 scans for the stable `/dev/v4l/by-path/*video-index0` source, and retries when a
@@ -187,6 +180,11 @@ the other device.
 ## 6. Operate And Diagnose
 
 ```bash
+scripts/reidctl.sh status
+scripts/reidctl.sh logs
+scripts/reidctl.sh restart
+scripts/reidctl.sh stop
+
 systemctl --user status reid-prime.service reid-camera.service
 journalctl --user -u reid-prime.service -f
 journalctl --user -u reid-camera.service -f

@@ -3,16 +3,15 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-JETSON_ENV_FILE="${JETSON_ENV_FILE:-${HOME}/.config/reid-pipeline/jetson.env}"
-if [ -r "${JETSON_ENV_FILE}" ]; then
-    set -a
-    source "${JETSON_ENV_FILE}"
-    set +a
-fi
+source scripts/runtime_env.sh
+load_runtime_env
+runtime_select_python
 
-mkdir -p outputs/realtime_worker_logs
+RUNTIME_LOG_DIR="${RUNTIME_LOG_DIR:-outputs}"
+WORKER_LOG_DIR="${RUNTIME_LOG_DIR}/realtime_worker_logs"
+mkdir -p "${WORKER_LOG_DIR}"
 
-PROFILE="${1:-${WORKER_PROFILE:-prime}}"
+PROFILE="${1:-${WORKER_PROFILE:-${PIPELINE_ROLE:-prime}}}"
 case "${PROFILE}" in
     prime)
         export REALTIME_CONFIG="${REALTIME_CONFIG:-configs/realtime_config.yaml}"
@@ -27,22 +26,16 @@ case "${PROFILE}" in
         exit 2
         ;;
 esac
-JETSON_VENV="${JETSON_VENV:-$(pwd)/.venv-jetson}"
-if [ -z "${PYTHON_BIN:-}" ] && [ -x "${JETSON_VENV}/bin/python" ]; then
-    PYTHON_BIN="${JETSON_VENV}/bin/python"
-else
-    PYTHON_BIN="${PYTHON_BIN:-python3}"
-fi
-export PYTHON_BIN
+WORKER_CONTROL_PORT="${WORKER_CONTROL_PORT:-8787}"
 
 if pgrep -f "[s]cripts/realtime_worker_control.py" >/dev/null; then
     echo "Worker control API is already running."
     exit 0
 fi
 
-nohup "${PYTHON_BIN}" -u scripts/realtime_worker_control.py \
+nohup "${RUNTIME_PYTHON_BIN}" -u scripts/realtime_worker_control.py \
     --config "${REALTIME_CONFIG}" \
-    > outputs/realtime_worker_logs/control.log 2>&1 &
+    > "${WORKER_LOG_DIR}/control.log" 2>&1 &
 echo "Worker control API started: pid=$!"
 echo "Profile: ${PROFILE} realtime_config=${REALTIME_CONFIG} yolo_config=${YOLO_CONFIG}"
-echo "Control URL: http://$(hostname -I | awk '{print $1}'):8787/status"
+echo "Control URL: http://$(hostname -I | awk '{print $1}'):${WORKER_CONTROL_PORT}/status"

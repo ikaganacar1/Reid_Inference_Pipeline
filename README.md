@@ -186,16 +186,31 @@ python main.py --video test_video.mp4
 
 ### Realtime Multi-Jetson Mode
 
-The current deployment uses one camera on each of two Orin devices. The same
-subsystem can be extended with globally unique camera IDs:
+Every device is configured from one private, repository-local `.env` file.
+YAML files remain internal defaults; normal deployment does not require editing
+them or passing startup arguments.
 
 ```bash
-# Prime Orin: centralized ReID, tracking, recording, LAN viewer, and cam1
-scripts/start_prime_dashboard.sh
-scripts/start_worker_control.sh prime
+# Prime device
+scripts/reidctl.sh init prime
+# Edit .env: PRIME_URL, CAMERA_IDS, model paths, and recording path.
+scripts/reidctl.sh smoke --load-models
+scripts/reidctl.sh start
 
-# Worker Orin: cam2
-scripts/start_worker_control.sh worker
+# Worker device
+scripts/reidctl.sh init worker
+# Edit .env: PRIME_URL, CAMERA_IDS, and YOLO_MODEL_PATH.
+scripts/reidctl.sh smoke --load-models
+scripts/reidctl.sh start
+```
+
+Operation is also centralized:
+
+```bash
+scripts/reidctl.sh status
+scripts/reidctl.sh logs
+scripts/reidctl.sh restart
+scripts/reidctl.sh stop
 ```
 
 See [docs/REALTIME_PIPELINE.md](docs/REALTIME_PIPELINE.md) for the network

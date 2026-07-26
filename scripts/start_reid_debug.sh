@@ -20,6 +20,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+source scripts/runtime_env.sh
+load_runtime_env
+
 CONDA_ENV="${CONDA_ENV:-tensorrt_blackwell}"
 # Empty means every discovered recording except the exclusions defined by the
 # replay tool. Set CHANNELS only when intentionally testing a smaller subset.
@@ -34,7 +37,7 @@ STRIDE="${STRIDE:-2}"
 REPLAY_FPS="${REPLAY_FPS:-0}"
 DETECTOR="${DETECTOR:-yolo}"
 YOLO_DEVICE="${YOLO_DEVICE:-cuda:0}"
-YOLO_CONF="${YOLO_CONF:-0.50}"
+YOLO_CONF="${YOLO_CONF:-${YOLO_CONFIDENCE:-0.50}}"
 YOLO_PROMPTS="${YOLO_PROMPTS:-person}"
 REID_BATCH_SIZE="${REID_BATCH_SIZE:-8}"
 REID_PROVIDER="${REID_PROVIDER:-CUDAExecutionProvider}"
@@ -54,6 +57,9 @@ TRACKER="${TRACKER:-botsort}"
 BOTSORT_TRACK_BUFFER="${BOTSORT_TRACK_BUFFER:-0}"
 OUTPUT_DIR="${OUTPUT_DIR:-experiments/offline_reid_debug_$(date +%Y%m%d_%H%M%S)_${REID_PRESET}}"
 
+if [ -z "${YOLO_MODEL:-}" ]; then
+    YOLO_MODEL="${YOLO_MODEL_PATH:-}"
+fi
 if [ -z "${YOLO_MODEL:-}" ]; then
     case "${DETECTOR}" in
         yolo)
@@ -89,7 +95,7 @@ prepend_onnxruntime_cuda_ld_library_path "${CONDA_PREFIX_PATH}" "${CONDA_SITE_PA
 
 case "${REID_PRESET}" in
     generalized)
-        REID_MODEL="${REID_MODEL:-TwinProject_models/reid_generalized_yolo11n/generalized_reid_swin_epoch119.onnx}"
+        REID_MODEL="${REID_MODEL:-${REID_MODEL_PATH:-TwinProject_models/reid_generalized_yolo11n/generalized_reid_swin_epoch119.onnx}}"
         REID_INPUT_HEIGHT="${REID_INPUT_HEIGHT:-256}"
         REID_INPUT_WIDTH="${REID_INPUT_WIDTH:-128}"
         EMBEDDING_DIM="${EMBEDDING_DIM:-1024}"

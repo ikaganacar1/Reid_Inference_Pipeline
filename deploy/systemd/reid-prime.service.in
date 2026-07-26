@@ -8,8 +8,9 @@ Type=simple
 WorkingDirectory=@REPO_DIR@
 EnvironmentFile=-@ENV_FILE@
 Environment=PYTHONUNBUFFERED=1
+Environment=REID_ENV_FILE=@ENV_FILE@
 ExecStartPre=@REPO_DIR@/scripts/with_onnxruntime_cuda_env.sh @PYTHON_BIN@ scripts/jetson_preflight.py --role prime --load-models
-ExecStart=@REPO_DIR@/scripts/with_onnxruntime_cuda_env.sh @PYTHON_BIN@ -u scripts/realtime_prime.py --config configs/realtime_config.yaml --config-dir configs
+ExecStart=@REPO_DIR@/scripts/with_onnxruntime_cuda_env.sh @PYTHON_BIN@ -u scripts/realtime_prime.py
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=20

@@ -18,8 +18,7 @@ REPO_DIR="$(pwd -P)"
 JETSON_VENV="${JETSON_VENV:-${REPO_DIR}/.venv-jetson}"
 PYTHON_BIN="${PYTHON_BIN:-${JETSON_VENV}/bin/python}"
 UNIT_DIR="${UNIT_DIR:-${HOME}/.config/systemd/user}"
-ENV_DIR="${ENV_DIR:-${HOME}/.config/reid-pipeline}"
-ENV_FILE="${ENV_FILE:-${ENV_DIR}/jetson.env}"
+ENV_FILE="${ENV_FILE:-${REPO_DIR}/.env}"
 
 if [ ! -x "${PYTHON_BIN}" ]; then
     echo "ERROR: Missing runtime Python: ${PYTHON_BIN}"
@@ -27,11 +26,25 @@ if [ ! -x "${PYTHON_BIN}" ]; then
     exit 1
 fi
 
-mkdir -p "${UNIT_DIR}" "${ENV_DIR}"
+mkdir -p "${UNIT_DIR}" "$(dirname "${ENV_FILE}")"
 if [ ! -f "${ENV_FILE}" ]; then
-    cp deploy/jetson.env.example "${ENV_FILE}"
+    cp .env.example "${ENV_FILE}"
+    if [ "${ROLE}" = "worker" ]; then
+        sed -i \
+            -e 's/^PIPELINE_ROLE=.*/PIPELINE_ROLE=worker/' \
+            -e 's/^CAMERA_IDS=.*/CAMERA_IDS=cam2/' \
+            "${ENV_FILE}"
+    fi
     chmod 600 "${ENV_FILE}"
     echo "Created environment file: ${ENV_FILE}"
+fi
+
+export REID_ENV_FILE="${ENV_FILE}"
+source scripts/runtime_env.sh
+load_runtime_env true
+if [ "${PIPELINE_ROLE:-${ROLE}}" != "${ROLE}" ]; then
+    echo "ERROR: ${ENV_FILE} has PIPELINE_ROLE=${PIPELINE_ROLE}, but installer role=${ROLE}."
+    exit 1
 fi
 
 escape_sed() {
@@ -41,32 +54,23 @@ escape_sed() {
 render_unit() {
     local template="$1"
     local destination="$2"
-    local realtime_config="${3:-configs/realtime_config.yaml}"
-    local yolo_config="${4:-configs/yolo_config.yaml}"
     sed \
         -e "s|@REPO_DIR@|$(escape_sed "${REPO_DIR}")|g" \
         -e "s|@PYTHON_BIN@|$(escape_sed "${PYTHON_BIN}")|g" \
         -e "s|@ENV_FILE@|$(escape_sed "${ENV_FILE}")|g" \
-        -e "s|@REALTIME_CONFIG@|$(escape_sed "${realtime_config}")|g" \
-        -e "s|@YOLO_CONFIG@|$(escape_sed "${yolo_config}")|g" \
         "${template}" > "${destination}"
 }
 
 units=()
 if [ "${ROLE}" = "prime" ]; then
     render_unit deploy/systemd/reid-prime.service.in "${UNIT_DIR}/reid-prime.service"
-    render_unit \
-        deploy/systemd/reid-camera.service.in \
-        "${UNIT_DIR}/reid-camera.service" \
-        configs/realtime_config.yaml \
-        configs/yolo_config.yaml
-    units+=(reid-prime.service reid-camera.service)
+    units+=(reid-prime.service)
+    if runtime_bool_true "${LOCAL_CAMERA_ENABLED:-true}"; then
+        render_unit deploy/systemd/reid-camera.service.in "${UNIT_DIR}/reid-camera.service"
+        units+=(reid-camera.service)
+    fi
 else
-    render_unit \
-        deploy/systemd/reid-camera.service.in \
-        "${UNIT_DIR}/reid-camera.service" \
-        configs/realtime_config.worker.yaml \
-        configs/yolo_config.worker.yaml
+    render_unit deploy/systemd/reid-camera.service.in "${UNIT_DIR}/reid-camera.service"
     units+=(reid-camera.service)
 fi
 
