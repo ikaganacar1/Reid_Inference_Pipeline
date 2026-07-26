@@ -4,28 +4,32 @@ Sequential cross-camera ReID: Burglar_comes_in (cam1) → Burglar_runs (cam2)
 
 YOLOE-26x detects with two text prompts: ["person", "intruder"]
 CLIP classifies each box as one or the other.
-Swin Base ReID (Triton) handles cross-camera re-identification.
+Separate local trackers feed the persistent global identity gallery used by
+the realtime pipeline.
 
 Usage:
-    python scripts/multicam_burglar_detection.py                    # YOLO11n
+    python scripts/multicam_burglar_detection.py                    # configured YOLO
     python scripts/multicam_burglar_detection.py --detector yoloe   # YOLOE-26x
     python scripts/multicam_burglar_detection.py --compare          # both + report
 """
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import time
 import numpy as np
 import cv2
+import yaml
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.detector import YOLOPersonDetector
 from src.yoloe_detector import YOLOEPersonDetector
-from src.reid_client import TritonReIDClient
+from src.reid_client import create_reid_client
+from src.realtime.identity_assignment import GlobalIdentityAssigner
 from src.tracker import ReIDTracker
 from src.utils.config_loader import load_all_configs
 
@@ -66,6 +70,14 @@ def class_color(cls_idx: int) -> tuple:
     return CLASS_COLORS.get(int(cls_idx), (180, 180, 180))
 
 
+def mask_for_track(track, masks):
+    """Return the mask associated with BoTSORT's original detection index."""
+    if len(track) < 8:
+        return None
+    det_idx = int(track[7])
+    return masks[det_idx] if 0 <= det_idx < len(masks) else None
+
+
 # ─── Drawing ───────────────────────────────────────────────────────────────────
 
 def draw_mask(frame, mask, color):
@@ -85,7 +97,8 @@ def draw_track(frame, track, class_names, mask=None):
     tid, cls = int(tid), int(cls)
 
     color = class_color(cls)
-    label = f"{class_names[cls] if cls < len(class_names) else 'person'}  ID:{tid}"
+    id_label = tid if tid >= 0 else "-"
+    label = f"{class_names[cls] if cls < len(class_names) else 'person'}  ID:{id_label}"
 
     if mask is not None:
         draw_mask(frame, mask, color)
@@ -131,10 +144,33 @@ def resize_pane(f):
     return cv2.resize(f, (PANE_W, PANE_H), interpolation=cv2.INTER_AREA)
 
 
+def assign_global_tracks(assigner, camera_id, frame_idx, timestamp, frame, tracks, embeddings, crops):
+    """Replace local tracker IDs with persistent global IDs for display and metrics."""
+    records = assigner.assign_tracks(
+        camera_id,
+        frame_idx,
+        frame.shape[1],
+        frame.shape[0],
+        tracks,
+        embeddings,
+        crops,
+        timestamp=timestamp,
+    )
+    global_tracks = []
+    for track, record in zip(tracks, records):
+        global_track = track.copy()
+        global_track[4] = record["global_id"] if record["global_id"] is not None else -1
+        global_tracks.append(global_track)
+    if not global_tracks:
+        return np.empty((0, 8), dtype=np.float32), records
+    return np.asarray(global_tracks), records
+
+
 def h264_encode(src: Path, dst: Path):
-    ffmpeg = next((p for p in ["/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg", "ffmpeg"]
-                   if Path(p).exists() or p == "ffmpeg"), "ffmpeg")
-    # Try h264_nvenc (GPU), then libx264 (CPU), then libopenh264
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise RuntimeError("ffmpeg was not found on PATH")
+
     for codec in ["h264_nvenc", "libx264", "libopenh264"]:
         try:
             subprocess.run([ffmpeg, "-y", "-i", str(src),
@@ -144,13 +180,13 @@ def h264_encode(src: Path, dst: Path):
             return
         except subprocess.CalledProcessError:
             continue
-    # Fallback: just rename raw file
-    src.rename(dst)
+
+    src.replace(dst)
 
 
 # ─── Pipeline ──────────────────────────────────────────────────────────────────
 
-def run_pipeline(detector, reid_client, tracker, output_path, det_label) -> dict:
+def run_pipeline(detector, reid_client, trackers, identity_assigner, output_path, det_label) -> dict:
     is_yoloe    = isinstance(detector, YOLOEPersonDetector)
     class_names = detector.text_prompts if is_yoloe else ["person"]
 
@@ -201,13 +237,25 @@ def run_pipeline(detector, reid_client, tracker, output_path, det_label) -> dict
         det_times1.append(time.time() - t_d)
         det_counts1.append(len(dets))
 
-        embs   = reid_client.infer(crops) if len(crops) > 0 else np.empty((0, 0))
-        tracks = tracker.update(dets, frame, embs)
-        cam1_ids.update(int(t[4]) for t in tracks)
+        embs = reid_client.infer(crops) if len(crops) > 0 else np.empty((0, 0))
+        local_tracks = trackers["cam1"].update(dets, frame, embs)
+        tracks, records = assign_global_tracks(
+            identity_assigner,
+            "cam1",
+            fidx,
+            fidx / fps,
+            frame,
+            local_tracks,
+            embs,
+            crops,
+        )
+        cam1_ids.update(
+            record["global_id"] for record in records if record["global_id"] is not None
+        )
 
         vis = frame.copy()
-        for i, t in enumerate(tracks):
-            draw_track(vis, t, class_names, mask=masks[i] if i < len(masks) else None)
+        for track in tracks:
+            draw_track(vis, track, class_names, mask=mask_for_track(track, masks))
 
         pane1 = resize_pane(vis)
         draw_hud(pane1, CAM1_LABEL, True, PANE_W)
@@ -223,11 +271,6 @@ def run_pipeline(detector, reid_client, tracker, output_path, det_label) -> dict
 
     cap1.release()
     print(f"  CAM1 done. IDs: {sorted(cam1_ids)}")
-
-    # Gap
-    dummy = np.zeros((PANE_H, PANE_W, 3), np.uint8)
-    for _ in range(GAP_FRAMES):
-        tracker.update(np.empty((0, 6)), dummy, np.empty((0, 0)))
 
     frozen1 = (last1.astype(np.float32) * 0.45).astype(np.uint8) if last1 is not None \
         else np.zeros((PANE_H, PANE_W, 3), np.uint8)
@@ -251,14 +294,26 @@ def run_pipeline(detector, reid_client, tracker, output_path, det_label) -> dict
         det_times2.append(time.time() - t_d)
         det_counts2.append(len(dets))
 
-        embs   = reid_client.infer(crops) if len(crops) > 0 else np.empty((0, 0))
-        tracks = tracker.update(dets, frame, embs)
-        cam2_ids.update(int(t[4]) for t in tracks)
+        embs = reid_client.infer(crops) if len(crops) > 0 else np.empty((0, 0))
+        local_tracks = trackers["cam2"].update(dets, frame, embs)
+        tracks, records = assign_global_tracks(
+            identity_assigner,
+            "cam2",
+            cidx,
+            (total1 + GAP_FRAMES + cidx) / fps,
+            frame,
+            local_tracks,
+            embs,
+            crops,
+        )
+        cam2_ids.update(
+            record["global_id"] for record in records if record["global_id"] is not None
+        )
         cross_ids = cam1_ids & cam2_ids
 
         vis = frame.copy()
-        for i, t in enumerate(tracks):
-            draw_track(vis, t, class_names, mask=masks[i] if i < len(masks) else None)
+        for track in tracks:
+            draw_track(vis, track, class_names, mask=mask_for_track(track, masks))
 
         pane2 = resize_pane(vis)
         draw_hud(pane2, CAM2_LABEL, True, PANE_W)
@@ -290,11 +345,12 @@ def run_pipeline(detector, reid_client, tracker, output_path, det_label) -> dict
         "cam2_total_dets":   int(sum(det_counts2)),
         "cam1_ids":          sorted(cam1_ids),
         "cam2_ids":          sorted(cam2_ids),
-        "cross_camera_reid": sorted(cross_ids),
-        "reid_success":      len(cross_ids) > 0,
+        "cross_camera_reid_candidates": sorted(cross_ids),
+        "reid_candidate_found":         len(cross_ids) > 0,
         "output":            str(output_path),
     }
-    print(f"  Done {total_t:.1f}s  |  ReID: {'SUCCESS ✓' if m['reid_success'] else 'FAILED ✗'}")
+    print(f"  Done {total_t:.1f}s  |  Cross-camera candidate: "
+          f"{'FOUND' if m['reid_candidate_found'] else 'NOT FOUND'}")
     return m
 
 
@@ -302,13 +358,13 @@ def run_pipeline(detector, reid_client, tracker, output_path, det_label) -> dict
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--detector", choices=["yolo11n", "yoloe"], default="yolo11n")
+    parser.add_argument("--detector", choices=["yolo", "yoloe"], default="yolo")
     parser.add_argument("--compare", action="store_true")
     args = parser.parse_args()
 
     Path("outputs").mkdir(exist_ok=True)
     configs = load_all_configs()
-    to_run  = ["yolo11n", "yoloe"] if args.compare else [args.detector]
+    to_run  = ["yolo", "yoloe"] if args.compare else [args.detector]
     results = []
 
     for name in to_run:
@@ -316,18 +372,30 @@ def main():
         print(f" [{name.upper()}]  Multi-Camera Burglar Detection")
         print(f"{'='*60}")
 
-        if name == "yolo11n":
+        if name == "yolo":
             det      = YOLOPersonDetector(configs['yolo'])
-            label    = "YOLO11n"
-            out_path = Path("outputs/multicam_burglar_yolo11n.mp4")
+            label    = Path(configs['yolo']['model']['path']).stem.upper()
+            out_path = Path("outputs/multicam_burglar_yolo.mp4")
         else:
             det      = YOLOEPersonDetector(configs['yoloe'])
             label    = f"YOLOE-26x  {configs['yoloe']['model']['text_prompts']}"
             out_path = Path("outputs/multicam_burglar_yoloe26.mp4")
 
-        reid    = TritonReIDClient(configs['reid'])
-        tracker = ReIDTracker(configs['tracker'])
-        m       = run_pipeline(det, reid, tracker, out_path, label)
+        reid = create_reid_client(configs['reid'])
+        trackers = {
+            "cam1": ReIDTracker(configs['tracker']),
+            "cam2": ReIDTracker(configs['tracker']),
+        }
+        with Path("configs/realtime_config.yaml").open() as realtime_file:
+            realtime_config = yaml.safe_load(realtime_file)
+        identity_assigner = GlobalIdentityAssigner(
+            realtime_config["prime"],
+            output_dir=out_path.parent / "multicam_reid_debug",
+        )
+        try:
+            m = run_pipeline(det, reid, trackers, identity_assigner, out_path, label)
+        finally:
+            reid.close()
         results.append(m)
 
         jp = out_path.with_suffix('.json')
@@ -337,7 +405,7 @@ def main():
     if args.compare and len(results) == 2:
         a, b = results
         print(f"\n{'='*60}")
-        print(f"  {'Metric':<32} {'YOLO11n':>9}  {'YOLOE-26x':>9}")
+        print(f"  {'Metric':<32} {'YOLO':>9}  {'YOLOE-26x':>9}")
         print(f"  {'-'*55}")
         rows = [
             ("Overall FPS",             f"{a['overall_fps']:.1f}",    f"{b['overall_fps']:.1f}"),
@@ -345,13 +413,13 @@ def main():
             ("Avg detection ms (CAM2)", f"{a['cam2_avg_det_ms']:.1f}", f"{b['cam2_avg_det_ms']:.1f}"),
             ("CAM1 total detections",   str(a['cam1_total_dets']),     str(b['cam1_total_dets'])),
             ("CAM2 total detections",   str(a['cam2_total_dets']),     str(b['cam2_total_dets'])),
-            ("Cross-camera ReID",       str(a['reid_success']),        str(b['reid_success'])),
+            ("Cross-camera candidate",  str(a['reid_candidate_found']), str(b['reid_candidate_found'])),
             ("Total time (s)",          f"{a['total_time_s']:.1f}",    f"{b['total_time_s']:.1f}"),
         ]
         for n, va, vb in rows:
             print(f"  {n:<32} {va:>9}  {vb:>9}")
         print(f"{'='*60}")
-        json.dump({"yolo11n": a, "yoloe26": b},
+        json.dump({"yolo": a, "yoloe26": b},
                   open("outputs/detector_comparison.json", 'w'), indent=2)
 
 

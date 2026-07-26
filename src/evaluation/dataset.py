@@ -7,8 +7,8 @@ import re
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional
 
-import cv2
 import numpy as np
+from PIL import Image
 
 
 class ReIDDataset:
@@ -153,19 +153,22 @@ class ReIDDataset:
             Tuple of (image, pid, camid)
         """
         img_path = self.images[idx]
-        img = cv2.imread(str(img_path))
-
-        if img is None:
-            raise ValueError(f"Failed to load image: {img_path}")
+        img = self._read_bgr(img_path)
 
         return img, self.pids[idx], self.camids[idx]
 
     def get_image(self, idx: int) -> np.ndarray:
         """Load single image by index."""
-        img = cv2.imread(str(self.images[idx]))
-        if img is None:
-            raise ValueError(f"Failed to load image: {self.images[idx]}")
-        return img
+        return self._read_bgr(self.images[idx])
+
+    @staticmethod
+    def _read_bgr(path: Path) -> np.ndarray:
+        try:
+            with Image.open(path) as image:
+                rgb = np.asarray(image.convert("RGB"))
+        except Exception as exc:
+            raise ValueError(f"Failed to load image: {path}") from exc
+        return np.ascontiguousarray(rgb[:, :, ::-1])
 
     def get_batch_images(self, indices: List[int]) -> List[np.ndarray]:
         """Load batch of images by indices."""

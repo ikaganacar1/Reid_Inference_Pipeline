@@ -42,6 +42,12 @@ models/*.plan
 models/*.pb
 models/*.trt
 models/*.weights
+# Models may also be staged at the repository root during export/debug. Keep
+# deployment binaries outside Git and select them through *_MODEL_PATH.
+*.pt
+*.torchscript
+*.ts
+*.onnx.data
 
 # Triton Model Repository
 triton_models/*/1/*.onnx
@@ -64,8 +70,9 @@ runs/
 *.mov
 *.mkv
 *.webm
-test_videos/*.mp4
-test_videos/*.avi
+test_videos/*
+!test_videos/.gitkeep
+recordings/
 
 # Images (if generating crops/frames)
 *.jpg
@@ -128,6 +135,19 @@ temp/
 *.tmp
 *.bak
 *.orig
+configs/backup/
+/note
+
+# Local deployment settings and credentials
+.env
+.env.*
+!.env.example
+deploy/*.env
+!deploy/*.env.example
+*.pem
+*.key
+*.p12
+*.pfx
 
 # Keep directory structure but ignore contents
 !.gitkeep
@@ -162,5 +182,5 @@ dmypy.json
 .claude/
 CLAUDE.md
 
-*.tlt 
-*.onnx 
+*.tlt
+*.onnx

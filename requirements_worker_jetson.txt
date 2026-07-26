@@ -1,0 +1,23 @@
+# Python-only runtime layered on an existing JetPack installation.
+# Create the venv with --system-site-packages so NVIDIA's compatible torch,
+# torchvision, OpenCV, CUDA and TensorRT packages remain authoritative.
+
+aiohttp>=3.9.0,<4.0.0
+matplotlib>=3.7.0,<4.0.0
+numpy>=1.23.0,<2.0.0
+pillow>=9.0.0
+psutil>=5.9.0
+py-cpuinfo>=9.0.0
+pyyaml>=6.0
+requests>=2.31.0,<3.0.0
+scipy>=1.10.0,<2.0.0
+polars>=0.20.0
+
+# Provided by JetPack/L4T on the Jetson:
+# - tensorrt
+# - opencv-python / cv2
+# - a JetPack-compatible torch/torchvision build
+# ultralytics and ultralytics-thop are installed with --no-deps by the runtime
+# installer so pip cannot replace those JetPack packages.
+# cuda-python is only needed by the optional custom TensorRT backend and must
+# match the CUDA major supplied by that JetPack release.

@@ -1,0 +1,9 @@
+reid:
+  filename: generalized_reid_swin_epoch119.onnx
+  size_bytes: 353417880
+  sha256: f93afdb73a167cc65041c438d39e598799bb4eca398b941fce3eefcabeaf9401
+
+yolo:
+  filename: yolo26m.pt
+  size_bytes: 44255705
+  sha256: 401cea9ab23ad19246ff7744859816bc599f350e93c9dd30367b6f0a0745d0b7

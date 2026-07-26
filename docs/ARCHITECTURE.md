@@ -1,5 +1,9 @@
 # ReID Pipeline - Technical Architecture
 
+> Note: This document describes the original LTCC 256-dimensional model path.
+> The active runtime uses the Swin Base 1024-dimensional model. Treat
+> `README.md`, `configs/`, and executable source code as authoritative.
+
 ## Table of Contents
 
 1. [System Architecture](#system-architecture)
@@ -62,20 +66,20 @@
 └────────┬─────────┘
          │
          ▼ [Preprocessing]
-         │  1. Resize to [384, 192]
+         │  1. Resize to configured model input
          │  2. BGR → RGB
          │  3. uint8 → float32 / 255
-         │  4. Apply ImageNet normalization
+         │  4. Apply model-specific configured normalization
          │  5. HWC → CHW
          │
 ┌──────────────────────┐
-│ Tensor [N, 3, 384,   │  CHW, float32
-│ 192]                 │  Range: [-2, 2] (normalized)
+│ Tensor [N, 3, H, W]  │  CHW, float32
+│                      │  Model-normalized
 │ Batched              │  Channels: R, G, B
 └────────┬─────────────┘
          │
-         ▼ [Triton HTTP API]
-         │  POST /v2/models/lttc_reid/infer
+         ▼ [Configured ReID backend]
+         │  Default: ONNX Runtime CUDA in process
          │  Input: "input" = tensor
          │  Output: "fc_pred" = embeddings
          │
@@ -239,10 +243,10 @@ def preprocess(crops: List[np.ndarray]) -> np.ndarray:
 
     batch = []
     for crop in crops:
-        # Step 1: Resize to 384x192
+        # Step 1: Resize to the configured input (default 256x128)
         # Bilinear interpolation
-        img = cv2.resize(crop, (192, 384), cv2.INTER_LINEAR)
-        # Shape: [384, 192, 3]
+        img = cv2.resize(crop, (128, 256), cv2.INTER_LINEAR)
+        # Shape: [256, 128, 3]
 
         # Step 2: BGR → RGB
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -252,16 +256,15 @@ def preprocess(crops: List[np.ndarray]) -> np.ndarray:
         img = img.astype(np.float32) / 255.0
         # Range: [0, 1]
 
-        # Step 4: ImageNet normalization
-        # Constants computed from ImageNet statistics
-        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        # Step 4: model-specific normalization from reid_config.yaml
+        mean = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+        std = np.array([0.5, 0.5, 0.5], dtype=np.float32)
         img = (img - mean) / std
         # Range: approximately [-2, 2]
 
         # Step 5: HWC → CHW
         img = np.transpose(img, (2, 0, 1))
-        # Shape now: [3, 384, 192]
+        # Shape now: [3, 256, 128]
 
         batch.append(img)
 

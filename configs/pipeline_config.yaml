@@ -11,5 +11,4 @@ logging:
   save_embeddings: false  # Save embeddings to disk (can be large)
 
 processing:
-  batch_size: 8  # Number of detections to batch for ReID inference
-  skip_frames: 0  # Process every Nth frame (0 = process all frames)
+  batch_size: 8  # Maximum crops sent in one ReID HTTP request

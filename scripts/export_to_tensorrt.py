@@ -11,7 +11,6 @@ import sys
 from pathlib import Path
 
 import tensorrt as trt
-import onnx
 
 # Add parent directory to path
 sys.path.append(str(Path(__file__).parent.parent))
@@ -29,6 +28,11 @@ class TensorRTEngineBuilder:
     def validate_onnx(self):
         """Validate ONNX model structure"""
         print(f"Validating ONNX model: {self.onnx_path}")
+        try:
+            import onnx
+        except Exception as exc:
+            print(f"WARNING: Python ONNX validation unavailable, skipping validation: {exc}")
+            return True
 
         model = onnx.load(str(self.onnx_path))
         onnx.checker.check_model(model)
@@ -78,6 +82,9 @@ class TensorRTEngineBuilder:
             trt.MemoryPoolType.WORKSPACE,
             self.config['workspace_mb'] * 1024 * 1024
         )
+        if "builder_optimization_level" in self.config and hasattr(config, "builder_optimization_level"):
+            config.builder_optimization_level = int(self.config["builder_optimization_level"])
+            print(f"  Builder optimization level: {config.builder_optimization_level}")
 
         # Enable FP16 if requested
         if self.config['precision'] == 'fp16':
@@ -100,7 +107,7 @@ class TensorRTEngineBuilder:
         profile.set_shape(input_name, min=min_shape, opt=opt_shape, max=max_shape)
         config.add_optimization_profile(profile)
 
-        print(f"  Optimization profile set:")
+        print("  Optimization profile set:")
         print(f"    Min shape: {min_shape}")
         print(f"    Opt shape: {opt_shape}")
         print(f"    Max shape: {max_shape}")
@@ -170,12 +177,12 @@ def main():
     parser = argparse.ArgumentParser(description="Export ONNX model to TensorRT engine")
     parser.add_argument(
         "--onnx",
-        default="models/lttc_0.1.4.49.onnx",
+        default="models/reidentificationnet_transformer_vdeployable_v1.0/swin_base_market1501_aicity156_featuredim1024.onnx",
         help="Path to ONNX model"
     )
     parser.add_argument(
         "--output",
-        default="triton_models/lttc_reid/1/model.plan",
+        default="triton_models/swin_base_reid/1/model.plan",
         help="Output path for TensorRT engine"
     )
     parser.add_argument(
@@ -248,7 +255,7 @@ def main():
     print("="*50)
     print(f"Engine path: {args.output}")
     print(f"Engine SHA256: {metadata['tensorrt_engine']['sha256'][:16]}...")
-    print(f"Ready for Triton Inference Server deployment")
+    print("Ready for Triton Inference Server deployment")
 
 
 if __name__ == "__main__":

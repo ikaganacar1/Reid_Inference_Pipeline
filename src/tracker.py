@@ -5,7 +5,17 @@ Multi-object tracker using BoTSORT with external TAO ReID embeddings
 
 import numpy as np
 import torch
-from boxmot import BotSort
+import importlib
+
+try:
+    from boxmot import BotSort
+except ImportError:
+    # BoxMOT 19+ no longer exposes BotSort at the package top level.
+    from boxmot.trackers.bbox.botsort.botsort import BotSort
+
+
+_botsort_module = importlib.import_module(BotSort.__module__)
+_BoxMOTBaseTrack = _botsort_module.BaseTrack
 
 
 class ExternalReIDBotSort(BotSort):
@@ -21,8 +31,14 @@ class ExternalReIDBotSort(BotSort):
     def __init__(self, with_reid=True, **kwargs):
         # Store the intended with_reid setting
         self._use_external_reid = with_reid
+        # BoxMOT resets a module-global ID counter in every BotSort constructor.
+        # Multiple camera trackers share that counter, so preserve it to prevent
+        # local ID reuse when another camera tracker is created or reset.
+        previous_track_count = int(_BoxMOTBaseTrack._count)
+
         # Initialize parent with with_reid=False to skip internal model loading
         super().__init__(with_reid=False, **kwargs)
+        _BoxMOTBaseTrack._count = max(previous_track_count, int(_BoxMOTBaseTrack._count))
         # Enable embedding-based matching for external embeddings
         if self._use_external_reid:
             self.with_reid = True
@@ -31,7 +47,7 @@ class ExternalReIDBotSort(BotSort):
 class ReIDTracker:
     """Multi-object tracker with external ReID embeddings"""
 
-    def __init__(self, config):
+    def __init__(self, config, with_reid=None):
         """
         Initialize BoxMOT tracker with external ReID support
 
@@ -41,12 +57,25 @@ class ReIDTracker:
         self.config = config['botsort']
         self.device = torch.device(config.get('device', 'cuda:0'))
         self.fp16 = config.get('fp16', True)
+        self.with_reid = self.config.get('with_reid', True) if with_reid is None else with_reid
+        self.frame_count = 0
 
         # Initialize BoTSORT tracker with external ReID support
         print("Initializing BoTSORT tracker...")
-        self.with_reid = self.config.get('with_reid', True)
+        self.tracker = self._create_tracker()
+
+        # Track history storage
+        self.track_history = {}  # track_id -> {embedding, last_seen, bbox}
+
+        print("  ✓ BoTSORT initialized")
+        print(f"  Track buffer: {self.config['track_buffer']} frames")
+        print(f"  Appearance threshold: {self.config['appearance_thresh']}")
+        print(f"  ReID enabled: {self.with_reid}")
+
+    def _create_tracker(self):
+        """Build a fresh BoTSORT instance with the configured external-ReID mode."""
         self.tracker = ExternalReIDBotSort(
-            reid_weights=None,  # No internal ReID model - using external Triton embeddings
+            reid_weights=None,  # No internal model; embeddings come from the configured ReID backend
             device=self.device,
             half=self.fp16,
             with_reid=self.with_reid,  # Enable embedding-based matching for re-identification
@@ -57,16 +86,10 @@ class ReIDTracker:
             match_thresh=self.config['match_thresh'],
             proximity_thresh=self.config['proximity_thresh'],
             appearance_thresh=self.config['appearance_thresh'],
+            cmc_method=self.config.get('cmc_method', 'ecc'),
             fuse_first_associate=self.config['fuse_first_associate']
         )
-
-        # Track history storage
-        self.track_history = {}  # track_id -> {embedding, last_seen, bbox}
-
-        print("  ✓ BoTSORT initialized")
-        print(f"  Track buffer: {self.config['track_buffer']} frames")
-        print(f"  Appearance threshold: {self.config['appearance_thresh']}")
-        print(f"  ReID enabled: {self.with_reid}")
+        return self.tracker
 
     def update(self, detections: np.ndarray, frame: np.ndarray, embeddings: np.ndarray) -> np.ndarray:
         """
@@ -75,41 +98,69 @@ class ReIDTracker:
         Args:
             detections: [N, 6] array (x1, y1, x2, y2, conf, cls)
             frame: Original frame image (H, W, 3)
-            embeddings: [N, 256] TAO ReID embeddings
+            embeddings: [N, D] TAO ReID embeddings
 
         Returns:
-            tracks: [M, 7] array (x1, y1, x2, y2, track_id, conf, cls)
+            tracks: [M, 8] array (x1, y1, x2, y2, track_id, conf, cls, det_idx)
         """
+        self.frame_count += 1
+
         if len(detections) == 0:
-            # Update tracker with empty detections (still pass embs to avoid internal model call)
-            tracks = self.tracker.update(np.empty((0, 6)), frame, embs=np.empty((0, 0)))
+            # Passing an empty array prevents the external-ReID tracker from attempting
+            # to call an internal model that was intentionally not loaded.
+            empty_embeddings = np.empty((0, 0), dtype=np.float32) if self.with_reid else None
+            tracks = self.tracker.update(np.empty((0, 6)), frame, embs=empty_embeddings)
+            self._prune_track_history()
             return tracks
 
         # Prepare detections for BoxMOT: [x1, y1, x2, y2, conf, cls]
         dets = detections[:, :6]
 
-        # Update tracker with external embeddings
-        # Always pass embs to avoid boxmot trying to use internal model
-        if embeddings is None or len(embeddings) == 0:
-            # Create dummy embeddings if none provided
-            embeddings = np.zeros((len(dets), 1024), dtype=np.float32)
+        if self.with_reid:
+            if embeddings is None or len(embeddings) == 0:
+                raise ValueError("ReID is enabled, but no external embeddings were provided")
+            if len(embeddings) != len(dets):
+                raise ValueError(
+                    f"Detection/embedding count mismatch: {len(dets)} detections, "
+                    f"{len(embeddings)} embeddings"
+                )
+        else:
+            embeddings = None
+
         tracks = self.tracker.update(dets, frame, embs=embeddings)
 
         # Update track history
-        if len(tracks) > 0:
+        if self.with_reid and len(tracks) > 0:
             for i, track in enumerate(tracks):
                 track_id = int(track[4])
                 bbox = track[:4]
 
-                # Store TAO embedding for this track
-                if i < len(embeddings):
+                # BoTSORT returns the original detection index in track[7].
+                if len(track) >= 8:
+                    det_idx = int(track[7])
+                else:
+                    det_idx = i
+
+                if 0 <= det_idx < len(embeddings):
                     self.track_history[track_id] = {
-                        "embedding": embeddings[i],
-                        "last_seen": len(self.track_history),  # frame counter
+                        "embedding": embeddings[det_idx],
+                        "last_seen": self.frame_count,
                         "bbox": bbox.tolist()
                     }
 
+        self._prune_track_history()
         return tracks
+
+    def _prune_track_history(self):
+        """Discard cached embeddings after the configured local retention window."""
+        track_buffer = self.config['track_buffer']
+        expired_ids = [
+            track_id
+            for track_id, track in self.track_history.items()
+            if self.frame_count - track["last_seen"] > track_buffer
+        ]
+        for track_id in expired_ids:
+            del self.track_history[track_id]
 
     def get_track_embedding(self, track_id: int) -> np.ndarray:
         """Get TAO embedding for a specific track"""
@@ -119,11 +170,12 @@ class ReIDTracker:
 
     def get_active_track_ids(self) -> list:
         """Get list of all active track IDs"""
-        return list(self.track_history.keys())
+        return [int(track.id) for track in self.tracker.active_tracks]
 
     def reset(self):
         """Reset tracker state"""
-        self.tracker.reset()
+        self.tracker = self._create_tracker()
+        self.frame_count = 0
         self.track_history.clear()
 
 
@@ -162,7 +214,7 @@ if __name__ == "__main__":
         if len(tracks) > 0:
             print(f"  Track IDs: {[int(t[4]) for t in tracks]}")
 
-        print(f"\nTracker test passed!")
+        print("\nTracker test passed!")
 
     except Exception as e:
         print(f"ERROR: {e}")

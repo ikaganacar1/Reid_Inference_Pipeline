@@ -183,10 +183,22 @@ def compute_cmc(distance_matrix: np.ndarray,
 
     num_queries = len(query_pids)
     max_rank = max(ranks)
+    if min(ranks) < 1 or max_rank > distance_matrix.shape[1]:
+        raise ValueError(
+            f"CMC ranks must be between 1 and gallery size {distance_matrix.shape[1]}, got {ranks}"
+        )
 
     all_cmc = []
 
     for q_idx in range(num_queries):
+        if not _has_valid_match(
+            query_pids[q_idx],
+            query_camids[q_idx],
+            gallery_pids,
+            gallery_camids,
+            exclude_same_camera,
+        ):
+            continue
         cmc, _ = evaluate_single_query(
             q_idx,
             distance_matrix[q_idx],
@@ -198,6 +210,8 @@ def compute_cmc(distance_matrix: np.ndarray,
         )
         all_cmc.append(cmc[:max_rank])
 
+    if not all_cmc:
+        raise ValueError("No query identity has a valid gallery match")
     all_cmc = np.array(all_cmc)
 
     # Compute accuracy at each rank
@@ -232,6 +246,14 @@ def compute_map(distance_matrix: np.ndarray,
     all_ap = []
 
     for q_idx in range(num_queries):
+        if not _has_valid_match(
+            query_pids[q_idx],
+            query_camids[q_idx],
+            gallery_pids,
+            gallery_camids,
+            exclude_same_camera,
+        ):
+            continue
         _, ap = evaluate_single_query(
             q_idx,
             distance_matrix[q_idx],
@@ -243,7 +265,22 @@ def compute_map(distance_matrix: np.ndarray,
         )
         all_ap.append(ap)
 
+    if not all_ap:
+        raise ValueError("No query identity has a valid gallery match")
     return np.mean(all_ap)
+
+
+def _has_valid_match(
+    query_pid: int,
+    query_camid: int,
+    gallery_pids: np.ndarray,
+    gallery_camids: np.ndarray,
+    exclude_same_camera: bool,
+) -> bool:
+    matches = gallery_pids == query_pid
+    if exclude_same_camera:
+        matches = matches & (gallery_camids != query_camid)
+    return bool(np.any(matches))
 
 
 def evaluate_reid(query_features: np.ndarray,

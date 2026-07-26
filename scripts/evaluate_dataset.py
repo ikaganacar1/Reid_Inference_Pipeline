@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import importlib
 import sys
 from pathlib import Path
 
@@ -139,7 +140,7 @@ def load_configs(args):
         with open(args.eval_config, 'r') as f:
             eval_config = yaml.safe_load(f)
     else:
-        print(f"WARNING: Evaluation config not found, using defaults")
+        print("WARNING: Evaluation config not found, using defaults")
         eval_config = {}
 
     # Override with command line arguments
@@ -165,7 +166,7 @@ def load_configs(args):
     return reid_config, eval_config
 
 
-def validate_environment():
+def validate_environment(reid_config):
     """Validate environment setup."""
     print("Validating environment...")
 
@@ -180,18 +181,19 @@ def validate_environment():
         print("  ERROR: PyTorch not installed")
         sys.exit(1)
 
-    # Check Triton client
-    try:
-        import tritonclient.http
-        print("  Triton client: OK")
-    except ImportError:
-        print("  ERROR: tritonclient not installed")
-        print("  Install with: pip install tritonclient[all]")
-        sys.exit(1)
+    backend = str(reid_config.get("backend", "triton")).lower()
+    if backend in {"triton", "triton_http", "onnxruntime_triton"}:
+        try:
+            importlib.import_module("tritonclient.http")
+            print("  Triton client: OK")
+        except ImportError:
+            print("  ERROR: tritonclient not installed")
+            print("  Install with: pip install tritonclient[http]")
+            sys.exit(1)
 
     # Check tqdm
     try:
-        import tqdm
+        importlib.import_module("tqdm")
         print("  tqdm: OK")
     except ImportError:
         print("  ERROR: tqdm not installed")
@@ -269,11 +271,11 @@ def main():
         run_from_embeddings(args, eval_config)
         return
 
-    # Validate environment
-    validate_environment()
-
     # Load configs
     reid_config, eval_config = load_configs(args)
+
+    # Validate environment
+    validate_environment(reid_config)
 
     # Validate data directory
     if not args.data_root.exists():
@@ -300,7 +302,7 @@ def main():
     try:
         from src.evaluation.evaluator import run_evaluation
 
-        results = run_evaluation(
+        run_evaluation(
             reid_config,
             eval_config,
             experiment_name=args.experiment_name
@@ -313,7 +315,7 @@ def main():
         sys.exit(1)
 
     except Exception as e:
-        print(f"\n\nERROR: Evaluation failed")
+        print("\n\nERROR: Evaluation failed")
         print(f"Error: {e}")
         import traceback
         traceback.print_exc()

@@ -1,5 +1,9 @@
 # ReID Inference Pipeline - Complete Guide
 
+> Note: This guide includes the original LTCC 256-dimensional model path.
+> The active runtime uses the Swin Base 1024-dimensional model. Treat
+> `README.md`, `configs/`, and executable source code as authoritative.
+
 **Version:** 0.2
 **Last Updated:** 2025-12-26
 **Author:** Reid Inference Team
@@ -301,20 +305,21 @@ iou_threshold: 0.6
 ### ReID Configuration (`configs/reid_config.yaml`)
 
 ```yaml
+backend: "onnxruntime_direct"
+
 triton:
-  server_url: "localhost:8100"      # Triton HTTP endpoint
-  model_name: "lttc_reid"           # Model name in Triton
+  server_url: "localhost:8100"       # Used only when backend is triton
+  model_name: "generalized_reid_swin"
   model_version: "1"                # Model version
 
 model:
-  onnx_path: "models/lttc_0.1.4.49.onnx"  # ONNX model file
-  engine_path: "triton_models/lttc_reid/1/model.plan"  # TensorRT engine
-  input_shape: [384, 192]           # [Height, Width]
-  embedding_dim: 256                # Output embedding dimension
+  onnx_path: "TwinProject_models/reid_generalized_yolo11n/generalized_reid_swin_epoch119.onnx"
+  input_shape: [256, 128]           # [Height, Width]
+  embedding_dim: 1024               # Output embedding dimension
 
 preprocessing:
-  mean: [0.485, 0.456, 0.406]      # ImageNet normalization mean
-  std: [0.229, 0.224, 0.225]       # ImageNet normalization std
+  mean: [0.5, 0.5, 0.5]            # Must match TAO training/export
+  std: [0.5, 0.5, 0.5]
   color_space: "RGB"                # Input color space
   channel_order: "CHW"              # Channel order (Channels-Height-Width)
 
@@ -326,14 +331,17 @@ tensorrt:
   workspace_mb: 2048                 # Workspace size in MB
 
 inference:
+  max_batch_size: 4
   max_retry: 3                       # Retry failed inferences
   timeout_ms: 5000                   # Timeout in milliseconds
 ```
 
 **Parameters Explained:**
-- `server_url`: Address where Triton is running
+- `backend`: Selects direct ONNX Runtime, direct TensorRT, or optional Triton
+- `server_url`: Address where Triton is running when the Triton backend is selected
 - `input_shape`: Must match ONNX model input dimensions
-- `mean/std`: Preprocessing normalization (ImageNet standard)
+- `mean/std`: Must exactly match the model's training/export configuration;
+  the generalized default uses `[0.5, 0.5, 0.5]` for both
 - `precision`: FP16 for speed, FP32 for accuracy
 - `opt_batch`: Should match Triton dynamic_batching preferred_batch_size
 
@@ -582,7 +590,7 @@ detections, crops = detector.detect(frame)
 ```
 Crops (Variable sizes)
     ↓
-[Resize All to 384x192]
+[Resize All to the configured model input]
     • Bilinear interpolation
     • Maintain aspect ratio with padding
     ↓
@@ -592,18 +600,18 @@ Crops (Variable sizes)
     ↓
 [Normalize]
     • Divide by 255.0 to get [0, 1]
-    • Apply ImageNet normalization:
+    • Apply the mean/std configured for the selected model:
       (x - mean) / std
     ↓
 [Convert HWC → CHW]
     • Transpose from (H, W, C) to (C, H, W)
     • Required by ONNX model
     ↓
-[Batch and Send to Triton]
-    • Create batch of [N, 3, 384, 192]
-    • Send via HTTP REST API
+[Batch and Infer]
+    • Create batch of [N, 3, H, W]
+    • Use the backend selected in reid_config.yaml
     ↓
-[Triton ONNX Inference]
+[ReID Inference]
     • Run on GPU via ONNX Runtime
     ↓
 [Extract Embeddings]

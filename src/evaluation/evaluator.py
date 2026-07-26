@@ -1,26 +1,26 @@
 """
 ReID Evaluator
-Main class for evaluating ReID models on Market1501-format datasets using Triton Inference Server
+Evaluate configured ReID backends on Market1501-format datasets.
 """
 
 import json
 import time
 import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 
 import numpy as np
 from tqdm import tqdm
 
 from .dataset import ReIDDataset, load_query_gallery
-from .metrics import evaluate_reid, compute_distance_matrix
+from .metrics import evaluate_reid
 
 
 class ReIDEvaluator:
     """
-    Evaluator for ReID models served via Triton Inference Server.
+    Evaluator for the ReID backend selected in reid_config.yaml.
 
-    Uses the existing TritonReIDClient for embedding extraction and computes
+    Uses the normal ReID client factory for embedding extraction and computes
     standard ReID metrics (CMC, mAP) following the Market1501 protocol.
     """
 
@@ -29,27 +29,29 @@ class ReIDEvaluator:
         Initialize evaluator.
 
         Args:
-            reid_config: ReID/Triton configuration (same as pipeline uses)
+            reid_config: ReID backend configuration (same as pipeline uses)
             eval_config: Evaluation-specific configuration
         """
         self.reid_config = reid_config
         self.eval_config = eval_config
 
         # Import here to avoid circular imports
-        from src.reid_client import TritonReIDClient
+        from src.reid_client import create_reid_client
 
-        print("Initializing Triton ReID client...")
-        self.reid_client = TritonReIDClient(reid_config)
+        print(f"Initializing ReID client backend={reid_config.get('backend', 'triton')}...")
+        self.reid_client = create_reid_client(reid_config)
 
         # Evaluation settings
         self.batch_size = eval_config.get('evaluation', {}).get('batch_size', 16)
 
-        # Validate batch size against Triton model config
-        triton_max_batch = reid_config.get('tensorrt', {}).get('max_batch', 16)
-        if self.batch_size > triton_max_batch:
-            print(f"WARNING: Configured batch_size ({self.batch_size}) exceeds Triton max_batch ({triton_max_batch})")
-            print(f"         Reducing batch_size to {triton_max_batch}")
-            self.batch_size = triton_max_batch
+        # Validate batch size against the active backend.
+        backend_max_batch = int(getattr(self.reid_client, 'max_batch_size', self.batch_size))
+        if self.batch_size > backend_max_batch:
+            print(
+                f"WARNING: Configured batch_size ({self.batch_size}) exceeds backend max_batch "
+                f"({backend_max_batch}); reducing it."
+            )
+            self.batch_size = backend_max_batch
         self.distance_metric = eval_config.get('evaluation', {}).get('distance_metric', 'cosine')
         self.cmc_ranks = eval_config.get('evaluation', {}).get('cmc_ranks', [1, 5, 10, 20])
         self.exclude_same_camera = eval_config.get('evaluation', {}).get('exclude_same_camera', True)
@@ -69,9 +71,11 @@ class ReIDEvaluator:
             desc: Progress bar description
 
         Returns:
-            Embeddings array [N, 256]
+            Embeddings array [N, embedding_dim]
         """
         num_images = len(dataset)
+        if num_images == 0:
+            raise ValueError(f"Cannot extract embeddings from empty split: {dataset.split}")
         all_embeddings = []
 
         # Process in batches
@@ -84,7 +88,7 @@ class ReIDEvaluator:
             # Load batch images
             batch_images = dataset.get_batch_images(list(range(start_idx, end_idx)))
 
-            # Extract embeddings via Triton
+            # Extract embeddings through the configured backend.
             embeddings = self.reid_client.infer(batch_images)
             all_embeddings.append(embeddings)
 
@@ -201,7 +205,7 @@ class ReIDEvaluator:
         for rank, acc in sorted(results['cmc'].items()):
             print(f"  Rank-{rank}: {acc * 100:.2f}%")
 
-        print(f"\nTiming:")
+        print("\nTiming:")
         print(f"  Embedding extraction: {extraction_time:.1f}s ({summary['timing']['images_per_second']:.1f} img/s)")
         print(f"  Metric computation: {eval_time:.1f}s")
         print(f"  Total: {total_time:.1f}s")

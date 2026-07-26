@@ -77,7 +77,7 @@ class ExperimentLogger:
                     }
                     for gpu in gpus
                 ]
-            except:
+            except Exception:
                 system_info["gpus"] = []
 
         with open(self.exp_dir / 'system_info.json', 'w') as f:
@@ -149,14 +149,16 @@ class ExperimentLogger:
         self.detection_log.write(json.dumps(log_entry) + '\n')
         self.detection_log.flush()
 
-    def log_embeddings(self, frame_idx: int, bboxes: np.ndarray, embeddings: np.ndarray, inference_time_ms: float):
+    def log_embeddings(self, frame_idx: int, bboxes: np.ndarray, embeddings: np.ndarray,
+                       inference_time_ms: float, save_embeddings: bool = True):
         """Log ReID embeddings per frame"""
         log_entry = {
             "frame_idx": frame_idx,
             "timestamp": datetime.datetime.now().isoformat(),
             "num_embeddings": len(embeddings),
             "bboxes": bboxes.tolist() if len(bboxes) > 0 else [],
-            "embeddings": embeddings.tolist() if len(embeddings) > 0 else [],
+            "embeddings_saved": save_embeddings,
+            "embeddings": embeddings.tolist() if save_embeddings and len(embeddings) > 0 else [],
             "inference_time_ms": inference_time_ms
         }
         self.embedding_log.write(json.dumps(log_entry) + '\n')
@@ -192,7 +194,7 @@ class ExperimentLogger:
                 if gpus:
                     log_entry["gpu_util_percent"] = gpus[0].load * 100
                     log_entry["gpu_memory_used_mb"] = gpus[0].memoryUsed
-            except:
+            except Exception:
                 pass
 
         self.metrics_log.write(json.dumps(log_entry) + '\n')
@@ -216,7 +218,6 @@ class ExperimentLogger:
 
 if __name__ == "__main__":
     # Test logger
-    import sys
 
     exp_dir = Path("experiments") / ExperimentLogger.create_experiment_id("test")
     logger = ExperimentLogger(exp_dir)
@@ -244,5 +245,5 @@ if __name__ == "__main__":
 
     logger.close()
 
-    print(f"\nLogger test completed!")
+    print("\nLogger test completed!")
     print(f"Check logs in: {exp_dir}")

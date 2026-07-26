@@ -1,18 +1,18 @@
 # YOLO Person Detection Configuration
 
 model:
-  path: "models/yolo11n.pt"
+  path: "yolo26m.pt"
   device: "cuda:0"
 
 detection:
-  conf_threshold: 0.35  # Confidence threshold (lowered for better recall)
+  conf_threshold: 0.50  # Reject low-confidence false-positive person detections
   iou_threshold: 0.7   # NMS IoU threshold
   classes: [0]  # COCO person class only
-  imgsz: 640    # Input image size
+  imgsz: 640
 
 # Performance settings
 inference:
-  half: true  # FP16 inference
+  half: true
   augment: false
   agnostic_nms: false
-  max_det: 300  # Maximum detections per image
+  max_det: 50

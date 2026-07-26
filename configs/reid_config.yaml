@@ -1,34 +1,46 @@
-# TAO ReID Model Configuration with Triton Inference Server
-# Swin Base Transformer ReID - 1024 dim embeddings for highest accuracy
+# TAO ReID Model Configuration
+# Generalized Swin ReID model exported from TAO checkpoint
+
+backend: "onnxruntime_direct"  # triton, tensorrt_direct, or onnxruntime_direct
 
 triton:
   server_url: "localhost:8100"  # HTTP endpoint
-  model_name: "swin_base_reid"
+  model_name: "generalized_reid_swin"
   model_version: "1"
   protocol: "http"  # or "grpc" on port 8101
 
 model:
-  onnx_path: "models/swin_base_reid.onnx"
-  input_shape: [256, 128]  # Height x Width (Swin Base standard)
-  embedding_dim: 1024  # Swin Base output dimension
+  onnx_path: "TwinProject_models/reid_generalized_yolo11n/generalized_reid_swin_epoch119.onnx"
+  search_paths:
+    - "~/TwinProject_models/reid_generalized_yolo11n"
+    - "models"
+  input_shape: [256, 128]  # Height x Width
+  embedding_dim: 1024  # Generalized Swin output dimension
 
 preprocessing:
-  # ImageNet normalization stats
-  mean: [0.485, 0.456, 0.406]
-  std: [0.229, 0.224, 0.225]
+  # Must match generalized_swin.yaml used for TAO training/export.
+  mean: [0.5, 0.5, 0.5]
+  std: [0.5, 0.5, 0.5]
 
   # Input format expectations
   color_space: "RGB"  # TAO models expect RGB
   channel_order: "CHW"  # Channels-Height-Width
 
 tensorrt:
+  # Export profile for optional TensorRT engine builds.
+  engine_path: "triton_models/generalized_reid_swin/1/model.plan"
+  device_id: 0
   min_batch: 1
-  opt_batch: 8
-  max_batch: 16
-  precision: "fp16"  # FP16 for Blackwell GPU
-  workspace_mb: 2048
+  opt_batch: 2
+  max_batch: 4
+  precision: "fp16"
+  workspace_mb: 1024
+
+onnxruntime:
+  providers: ["CUDAExecutionProvider", "CPUExecutionProvider"]
 
 # Performance settings
 inference:
+  max_batch_size: 4
   max_retry: 3
   timeout_ms: 5000

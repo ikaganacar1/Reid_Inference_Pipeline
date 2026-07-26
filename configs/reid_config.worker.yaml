@@ -1,0 +1,31 @@
+# Camera-only workers do not load ReID. This mirror exists only for a worker
+# promoted to prime; keep it identical to the generalized model contract.
+backend: "onnxruntime_direct"
+
+triton:
+  server_url: "localhost:8100"
+  model_name: "generalized_reid_swin"
+  model_version: "1"
+  protocol: "http"
+
+model:
+  onnx_path: "TwinProject_models/reid_generalized_yolo11n/generalized_reid_swin_epoch119.onnx"
+  search_paths:
+    - "~/TwinProject_models/reid_generalized_yolo11n"
+    - "models"
+  input_shape: [256, 128]
+  embedding_dim: 1024
+
+preprocessing:
+  mean: [0.5, 0.5, 0.5]
+  std: [0.5, 0.5, 0.5]
+  color_space: "RGB"
+  channel_order: "CHW"
+
+onnxruntime:
+  providers: ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+inference:
+  max_batch_size: 4
+  max_retry: 3
+  timeout_ms: 5000

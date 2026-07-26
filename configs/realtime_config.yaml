@@ -1,0 +1,158 @@
+# Realtime multi-Jetson pipeline configuration
+
+network:
+  # Documentation-only address. Override PRIME_URL on every deployed device.
+  prime_url: "ws://192.0.2.10:8765"
+  prime_bind_host: "0.0.0.0"
+  prime_port: 8765
+  ingest_path: "/ws/ingest"
+  viewer_path: "/ws/view"
+
+worker:
+  # Override per Jetson with --camera-id and --source.
+  camera_id: "cam1"
+  source: 0
+  target_fps: 10
+  capture_width: 640
+  capture_height: 480
+  capture_fps: 10
+  frame_jpeg_quality: 70
+  crop_jpeg_quality: 85
+  reconnect_seconds: 3
+  print_every_frames: 100
+
+prime:
+  output_dir: "outputs/realtime"
+  save_video: true
+  output_fps: 10
+  # Finalize recordings periodically so a crash cannot damage an entire shift.
+  # Segment deletion/retention is intentionally left to site policy.
+  recording_segment_seconds: 900
+  # Pause recording before storage pressure can destabilize the prime.
+  recording_min_free_gb: 5
+  recording_disk_check_seconds: 10
+  viewer_jpeg_quality: 75
+  viewer_send_timeout_seconds: 0.2
+  camera_offline_seconds: 5.0
+  reid_batch_size: 4
+  sync_batch_window_ms: 25
+  sync_batch_max_packets: 4
+  max_queue_size: 16
+  client_max_size_mb: 32
+  max_capture_clock_skew_seconds: 5.0
+  camera_tracker_reset_seconds: 3.0
+
+  # Cross-camera global ID gallery. Lower threshold is stricter.
+  # Factory uniforms make appearance distances tight; lenient values over-merge.
+  global_match_threshold: 0.3
+  gallery_ttl_seconds: 300
+  gallery_ema_alpha: 0.8
+  gallery_max_exemplars: 8
+  # Match against bounded per-camera-track prototypes so one long view cannot
+  # erase earlier appearances of the same person.
+  gallery_use_exemplars_for_matching: true
+  debug_reid: false
+  save_debug_crops: false
+  debug_crop_interval_frames: 10
+  # A single-frame edge-shape rule also rejects real people entering view.
+  # Leave it off; use detector confidence or a temporal false-positive filter.
+  filter_edge_false_positives: false
+  edge_filter_margin_ratio: 0.025
+  edge_filter_max_width_ratio: 0.22
+  edge_filter_min_height_ratio: 0.45
+  new_identity_min_frames: 5
+  # Frame count alone is rate-dependent: five frames are 0.16 s at 25 FPS.
+  new_identity_min_seconds: 0.4
+  # Near misses get more time to produce a clear full-body crop before a new ID.
+  new_identity_ambiguous_wait_seconds: 2.0
+  new_identity_ambiguous_distance: 0.45
+  # Suppress duplicate tracker rows for effectively identical person boxes.
+  duplicate_local_track_iou_threshold: 0.85
+  # Two spatially separate local tracks that coexist in one camera are proven
+  # to be different people. Persist that cannot-link evidence after one leaves.
+  same_camera_conflict_min_frames: 3
+  same_camera_conflict_min_seconds: 0.2
+  same_camera_conflict_max_iou: 0.2
+  same_camera_conflict_max_gap_seconds: 0.5
+  same_camera_conflict_ttl_seconds: 300
+  # Pending observations that strongly agree across overlapping cameras share
+  # cannot-link evidence before either one is allowed to mutate the gallery.
+  pending_overlap_link_threshold: 0.22
+  pending_overlap_link_active_seconds: 0.5
+  # Narrow recovery path for a long edge-clipped track in a declared overlap.
+  # It only updates the deep gallery from the first interior crop, never from
+  # the weak partial-view average used to establish temporal evidence.
+  overlap_lightness_fallback_enabled: true
+  overlap_lightness_min_seconds: 2.0
+  overlap_lightness_min_edge_frames: 5
+  overlap_lightness_min_covisible_seconds: 1.0
+  overlap_lightness_max_embedding_distance: 0.5
+  overlap_lightness_max_distance: 0.12
+  overlap_lightness_match_margin: 0.04
+  overlap_lightness_score_weight: 1.0
+  identity_lightness_ema_alpha: 0.8
+  pending_identity_ttl_seconds: 2.0
+  recheck_existing_tracks: true
+  existing_track_recheck_threshold: 0.55
+  existing_track_remap_margin: 0.08
+  # Do not authorize an ID switch from a crop cut off by a frame boundary.
+  existing_track_remap_require_interior: true
+  existing_track_max_distance: 0.45
+  identity_update_max_distance: 0.35
+  # Preserve a continuous short-term motion track through occlusion, but do not
+  # update its gallery centroid while appearance is inconsistent.
+  split_existing_track_on_drift: false
+  # Prevent one ID from being active in non-overlapping cameras concurrently.
+  cross_camera_exclusion_seconds: 1.0
+  # Keep the deployment conservative unless physical camera overlap is known.
+  # Pairs use global camera IDs, for example: [["cam1", "cam2"]].
+  allow_all_camera_overlap: false
+  overlapping_camera_pairs: []
+  # Adjacent pairs permit a fast sequential handoff but never simultaneous use.
+  adjacent_camera_pairs: []
+  new_track_match_threshold: 0.3
+  new_track_match_margin: 0.08
+  new_track_single_candidate_threshold: 0.16
+  # A temporally confirmed track may use a slightly wider appearance gate only
+  # when its candidate is active in a physically overlapping camera.
+  overlap_new_track_match_threshold: 0.35
+  overlap_new_track_match_margin: 0.04
+  overlap_candidate_active_seconds: 1.0
+  # Relaxed overlap-only matches are useful across difficult viewpoints, but
+  # they must not mutate a gallery identity from a brief borderline crop.
+  overlap_new_track_min_seconds: 0.4
+  adjacent_new_track_match_threshold: 0.3
+  adjacent_new_track_match_margin: 0.05
+  adjacent_candidate_max_seconds: 5.0
+  adjacent_camera_exclusion_seconds: 0.25
+  identity_min_confidence: 0.55
+  # Smaller/upscaled crops and frame-edge fragments produce unstable embeddings.
+  identity_min_height_ratio: 0.10
+  identity_min_area_ratio: 0.0015
+  identity_edge_margin_ratio: 0.01
+  identity_edge_min_confidence: 0.65
+  new_identity_require_interior: true
+
+control:
+  worker:
+    bind_host: "0.0.0.0"
+    port: 8787
+    auto_scan: true
+    start_on_launch: true
+    auto_start_retry_seconds: 5
+    sources: []
+    camera_ids: ["cam1"]
+  worker_nodes:
+    - name: "prime-jetson"
+      url: "http://192.0.2.10:8787"
+    - name: "worker-jetson"
+      url: "http://192.0.2.11:8787"
+
+deployment:
+  cameras:
+    - camera_id: "cam1"
+      jetson: "prime-jetson"
+      source: "auto"
+    - camera_id: "cam2"
+      jetson: "worker-jetson"
+      source: "auto"

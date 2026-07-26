@@ -6,10 +6,22 @@ HTTP client wrapper for TAO ReID model served by Triton Inference Server
 import time
 from typing import List
 
-import cv2
 import numpy as np
-import tritonclient.http as httpclient
-from tritonclient.utils import InferenceServerException
+
+from .reid_preprocessing import preprocess_reid_crops
+
+
+def _load_triton_http_client():
+    """Import Triton HTTP support only when the Triton backend is used."""
+    try:
+        import tritonclient.http as httpclient
+        from tritonclient.utils import InferenceServerException
+    except Exception as exc:
+        raise RuntimeError(
+            "Triton HTTP client support is not available. Install "
+            "'tritonclient[http]' or use the 'tensorrt_direct' backend."
+        ) from exc
+    return httpclient, InferenceServerException
 
 
 class TritonReIDClient:
@@ -30,14 +42,23 @@ class TritonReIDClient:
         # Preprocessing parameters
         self.mean = np.array(config['preprocessing']['mean'], dtype=np.float32)
         self.std = np.array(config['preprocessing']['std'], dtype=np.float32)
+        self.color_space = config['preprocessing'].get('color_space', 'RGB')
+        self.channel_order = config['preprocessing'].get('channel_order', 'CHW')
         self.input_shape = config['model']['input_shape']  # [H, W]
         self.embedding_dim = config['model']['embedding_dim']  # Embedding dimension
+        inference_config = config.get('inference', {})
+        self.max_batch_size = inference_config.get('max_batch_size', 16)
+        self.max_retry = inference_config.get('max_retry', 3)
+        self.timeout_ms = inference_config.get('timeout_ms', 5000)
+        self.httpclient, self.InferenceServerException = _load_triton_http_client()
 
         # Create Triton client
         try:
-            self.client = httpclient.InferenceServerClient(
+            self.client = self.httpclient.InferenceServerClient(
                 url=self.triton_url,
-                verbose=False
+                verbose=False,
+                connection_timeout=self.timeout_ms / 1000,
+                network_timeout=self.timeout_ms / 1000
             )
         except Exception as e:
             raise RuntimeError(f"Failed to create Triton client: {e}")
@@ -61,7 +82,7 @@ class TritonReIDClient:
             print(f"✓ Connected to Triton server: {self.triton_url}")
             print(f"✓ Model '{self.model_name}' (v{self.model_version}) is ready")
 
-        except InferenceServerException as e:
+        except self.InferenceServerException as e:
             raise RuntimeError(f"Triton server error: {e}")
 
     def preprocess(self, crops: List[np.ndarray]) -> np.ndarray:
@@ -74,71 +95,66 @@ class TritonReIDClient:
         Returns:
             Batched tensor [N, 3, H, W] normalized and CHW format
         """
-        batch = []
-        H, W = self.input_shape  # 384, 192
+        return preprocess_reid_crops(
+            crops,
+            self.input_shape,
+            self.mean,
+            self.std,
+            self.color_space,
+            self.channel_order,
+        )
 
-        for crop in crops:
-            # Resize to expected input size (H x W)
-            img = cv2.resize(crop, (W, H), interpolation=cv2.INTER_LINEAR)
-
-            # BGR to RGB
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-            # Normalize to [0, 1]
-            img = img.astype(np.float32) / 255.0
-
-            # Apply ImageNet normalization
-            img = (img - self.mean) / self.std
-
-            # HWC to CHW
-            img = np.transpose(img, (2, 0, 1))
-
-            batch.append(img)
-
-        return np.array(batch, dtype=np.float32)
-
-    def infer(self, crops: List[np.ndarray], retry=3) -> np.ndarray:
+    def infer(self, crops: List[np.ndarray], retry=None, max_batch_size=None) -> np.ndarray:
         """
         Extract ReID embeddings from person crops
 
         Args:
             crops: List of person crop images (BGR format)
             retry: Number of retries on failure
+            max_batch_size: Maximum crops per Triton request
 
         Returns:
-            Embeddings array [N, 256]
+            Embeddings array [N, embedding_dim]
         """
         if len(crops) == 0:
-            return np.array([])
+            return np.empty((0, self.embedding_dim), dtype=np.float32)
 
-        # Preprocess
+        request_batch_size = self.max_batch_size if max_batch_size is None else max_batch_size
+        if request_batch_size <= 0:
+            raise ValueError(f"max_batch_size must be positive, got {request_batch_size}")
+
+        chunks = [
+            self._infer_batch(crops[start:start + request_batch_size], retry=retry)
+            for start in range(0, len(crops), request_batch_size)
+        ]
+        return np.vstack(chunks)
+
+    def _infer_batch(self, crops: List[np.ndarray], retry=None) -> np.ndarray:
+        """Extract embeddings for one bounded Triton request."""
+        retry = self.max_retry if retry is None else retry
         batch = self.preprocess(crops)
         batch_size = len(crops)
 
         # Create Triton input
         inputs = [
-            httpclient.InferInput("input", batch.shape, "FP32")
+            self.httpclient.InferInput("input", batch.shape, "FP32")
         ]
         inputs[0].set_data_from_numpy(batch)
 
         # Create output request
         outputs = [
-            httpclient.InferRequestedOutput("fc_pred")
+            self.httpclient.InferRequestedOutput("fc_pred")
         ]
 
         # Inference with retry
         for attempt in range(retry):
             try:
-                start_time = time.time()
-
                 response = self.client.infer(
                     model_name=self.model_name,
                     model_version=self.model_version,
                     inputs=inputs,
                     outputs=outputs
                 )
-
-                inference_time = time.time() - start_time
 
                 # Extract embeddings
                 embeddings = response.as_numpy("fc_pred")
@@ -152,7 +168,7 @@ class TritonReIDClient:
 
                 return embeddings
 
-            except InferenceServerException as e:
+            except self.InferenceServerException as e:
                 if attempt < retry - 1:
                     print(f"WARNING: Triton inference failed (attempt {attempt + 1}/{retry}): {e}")
                     time.sleep(0.1)
@@ -170,7 +186,7 @@ class TritonReIDClient:
                 model_version=self.model_version
             )
             return metadata
-        except InferenceServerException as e:
+        except self.InferenceServerException as e:
             print(f"WARNING: Failed to get model metadata: {e}")
             return None
 
@@ -182,7 +198,7 @@ class TritonReIDClient:
                 model_version=self.model_version
             )
             return config
-        except InferenceServerException as e:
+        except self.InferenceServerException as e:
             print(f"WARNING: Failed to get model config: {e}")
             return None
 
@@ -190,6 +206,28 @@ class TritonReIDClient:
         """Close Triton client connection"""
         # HTTP client doesn't need explicit closing
         pass
+
+
+def create_reid_client(config):
+    """Create the configured ReID inference client.
+
+    Supported backends:
+      - triton / triton_http / onnxruntime_triton: TritonReIDClient
+      - tensorrt_direct / tensorrt: in-process TensorRTReIDClient
+      - onnxruntime / onnxruntime_direct / onnx: in-process ONNXRuntimeReIDClient
+    """
+    backend = str(config.get("backend", "triton")).lower()
+    if backend in {"triton", "triton_http", "onnxruntime_triton"}:
+        return TritonReIDClient(config)
+    if backend in {"tensorrt", "tensorrt_direct", "direct_tensorrt"}:
+        from .tensorrt_reid_client import TensorRTReIDClient
+
+        return TensorRTReIDClient(config)
+    if backend in {"onnx", "onnxruntime", "onnxruntime_direct", "direct_onnxruntime"}:
+        from .onnx_reid_client import ONNXRuntimeReIDClient
+
+        return ONNXRuntimeReIDClient(config)
+    raise ValueError(f"Unsupported ReID backend: {backend}")
 
 
 if __name__ == "__main__":
@@ -207,16 +245,15 @@ if __name__ == "__main__":
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
 
-    # Create client
+    # Create the configured client.
     try:
-        client = TritonReIDClient(config)
+        client = create_reid_client(config)
 
         # Get metadata
         metadata = client.get_model_metadata()
         if metadata:
-            print(f"\nModel metadata:")
-            print(f"  Name: {metadata.get('name')}")
-            print(f"  Version: {metadata.get('versions')}")
+            print("\nModel metadata:")
+            print(metadata)
 
         # Create dummy crops for testing
         dummy_crops = [np.random.randint(0, 255, (256, 128, 3), dtype=np.uint8) for _ in range(4)]
@@ -226,7 +263,8 @@ if __name__ == "__main__":
 
         print(f"  Output shape: {embeddings.shape}")
         print(f"  Embedding range: [{embeddings.min():.3f}, {embeddings.max():.3f}]")
-        print(f"\nTriton ReID client test passed!")
+        print("\nConfigured ReID client test passed!")
+        client.close()
 
     except Exception as e:
         print(f"ERROR: {e}")

@@ -1,6 +1,6 @@
 """
 ReID Pipeline Orchestration
-Main pipeline integrating YOLO detection, TAO ReID (Triton), and BoxMOT tracking
+Main pipeline integrating YOLO detection, configured TAO ReID inference, and BoxMOT tracking
 """
 
 import time
@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 from .detector import YOLOPersonDetector
-from .reid_client import TritonReIDClient
+from .reid_client import create_reid_client
 from .tracker import ReIDTracker
 from .logger import ExperimentLogger
 from .utils.visualization import Visualizer
@@ -41,8 +41,8 @@ class ReIDPipeline:
         print("\n[1/5] Initializing YOLO detector...")
         self.detector = YOLOPersonDetector(configs['yolo'])
 
-        print("\n[2/5] Initializing Triton ReID client...")
-        self.reid_client = TritonReIDClient(configs['reid'])
+        print("\n[2/5] Initializing ReID client...")
+        self.reid_client = create_reid_client(configs['reid'])
 
         print("\n[3/5] Initializing BoxMOT tracker...")
         self.tracker = ReIDTracker(configs['tracker'])
@@ -54,6 +54,9 @@ class ReIDPipeline:
         yolo_path = Path(configs['yolo']['model']['path'])
         if yolo_path.exists():
             self.logger.log_model_version(yolo_path, "yolo")
+        reid_path = Path(configs['reid']['model']['onnx_path'])
+        if reid_path.exists():
+            self.logger.log_model_version(reid_path, "reid")
 
         print("\n[5/5] Initializing visualizer and metrics...")
         self.visualizer = Visualizer()
@@ -61,7 +64,14 @@ class ReIDPipeline:
 
         # Pipeline settings
         self.save_visualization = configs['pipeline'].get('io', {}).get('save_visualization', True)
+        self.display = configs['pipeline'].get('io', {}).get('display', False)
         self.log_every_n_frames = configs['pipeline'].get('logging', {}).get('log_every_n_frames', 30)
+        self.save_crops = configs['pipeline'].get('logging', {}).get('save_crops', False)
+        self.save_embeddings = configs['pipeline'].get('logging', {}).get('save_embeddings', False)
+        self.reid_batch_size = configs['pipeline'].get('processing', {}).get('batch_size')
+        self.crops_dir = self.exp_dir / "crops"
+        if self.save_crops:
+            self.crops_dir.mkdir(parents=True, exist_ok=True)
 
         print("\n" + "="*60)
         print("Pipeline initialization completed!")
@@ -87,10 +97,17 @@ class ReIDPipeline:
 
         # Open video
         cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            raise RuntimeError(f"Failed to open input video: {video_path}")
         fps = cap.get(cv2.CAP_PROP_FPS)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if fps <= 0 or width <= 0 or height <= 0:
+            cap.release()
+            raise RuntimeError(
+                f"Invalid video metadata for {video_path}: {width}x{height} at {fps} FPS"
+            )
 
         print(f"  Resolution: {width}x{height}")
         print(f"  FPS: {fps}")
@@ -103,12 +120,15 @@ class ReIDPipeline:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             out = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+            if not out.isOpened():
+                cap.release()
+                raise RuntimeError(f"Failed to open output video writer: {output_path}")
             print(f"  Output video: {output_path}")
 
         frame_idx = 0
         start_time = time.time()
 
-        print(f"\nStarting processing...")
+        print("\nStarting processing...")
         print("-" * 60)
 
         try:
@@ -133,10 +153,19 @@ class ReIDPipeline:
                 # Stage 2: ReID Embeddings
                 reid_start = time.time()
                 if len(crops) > 0:
-                    embeddings = self.reid_client.infer(crops)
-                    self.logger.log_embeddings(frame_idx, detections[:, :4], embeddings, (time.time() - reid_start) * 1000)
+                    embeddings = self.reid_client.infer(crops, max_batch_size=self.reid_batch_size)
+                    self.logger.log_embeddings(
+                        frame_idx,
+                        detections[:, :4],
+                        embeddings,
+                        (time.time() - reid_start) * 1000,
+                        save_embeddings=self.save_embeddings
+                    )
+                    if self.save_crops:
+                        for crop_idx, crop in enumerate(crops):
+                            cv2.imwrite(str(self.crops_dir / f"frame_{frame_idx:08d}_crop_{crop_idx:04d}.jpg"), crop)
                 else:
-                    embeddings = np.array([])
+                    embeddings = np.empty((0, self.reid_client.embedding_dim), dtype=np.float32)
                 reid_time = time.time() - reid_start
 
                 # Stage 3: Tracking
@@ -162,7 +191,7 @@ class ReIDPipeline:
                     )
 
                 # Visualization
-                if out is not None:
+                if out is not None or self.display:
                     # Draw tracks
                     self.visualizer.draw_tracks(frame, tracks)
 
@@ -175,7 +204,14 @@ class ReIDPipeline:
                     }
                     self.visualizer.draw_stats(frame, stats, position="top-left")
 
-                    out.write(frame)
+                    if out is not None:
+                        out.write(frame)
+
+                    if self.display:
+                        cv2.imshow("ReID Pipeline", frame)
+                        if cv2.waitKey(1) & 0xFF == ord('q'):
+                            print("\nDisplay closed by user")
+                            break
 
                 # Progress update
                 if (frame_idx + 1) % 100 == 0:
@@ -189,29 +225,23 @@ class ReIDPipeline:
 
                 frame_idx += 1
 
-        except KeyboardInterrupt:
-            print("\n\nProcessing interrupted by user")
-
-        except Exception as e:
-            print(f"\n\nERROR during processing: {e}")
-            import traceback
-            traceback.print_exc()
-
         finally:
             # Cleanup
             cap.release()
             if out is not None:
                 out.release()
+            if self.display:
+                cv2.destroyAllWindows()
 
             total_time = time.time() - start_time
 
             print("\n" + "="*60)
-            print("Processing completed!")
+            print("Processing summary")
             print("="*60)
 
             # Print summary
             summary = self.metrics.get_summary()
-            print(f"\nSummary:")
+            print("\nSummary:")
             print(f"  Total frames processed: {summary['total_frames']}")
             print(f"  Total detections: {summary['total_detections']}")
             print(f"  Total tracks: {summary['total_tracks']}")
@@ -223,12 +253,13 @@ class ReIDPipeline:
 
             # Close logger
             self.logger.close()
+            self.reid_client.close()
 
             print(f"\nExperiment logs saved to: {self.exp_dir}")
             if output_path:
                 print(f"Visualization saved to: {output_path}")
 
-            return self.exp_dir
+        return self.exp_dir
 
 
 if __name__ == "__main__":

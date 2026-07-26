@@ -4,17 +4,30 @@
 set -e
 
 # Configuration
-TRITON_IMAGE="nvcr.io/nvidia/tritonserver:25.04-py3"
+TRITON_IMAGE="${TRITON_IMAGE:-nvcr.io/nvidia/tritonserver:25.04-py3-igpu}"
 CONTAINER_NAME="triton-reid-server"
 MODEL_REPO="$(pwd)/triton_models"
+MODEL_NAME="${TRITON_MODEL_NAME:-generalized_reid_swin}"
+GPU_RUNTIME_ARGS=()
+if [ -n "${TRITON_DOCKER_GPU_ARGS:-}" ]; then
+    # Example for discrete GPU hosts:
+    #   TRITON_DOCKER_GPU_ARGS="--gpus all" bash scripts/start_triton_server.sh
+    read -r -a GPU_RUNTIME_ARGS <<< "$TRITON_DOCKER_GPU_ARGS"
+else
+    # Jetson/iGPU Triton images require the NVIDIA runtime directly.
+    GPU_RUNTIME_ARGS=(--runtime=nvidia)
+fi
 HTTP_PORT=8100
 GRPC_PORT=8101
 METRICS_PORT=8102
+MAX_RETRIES="${TRITON_STARTUP_RETRIES:-120}"
 
 echo "=================================================="
 echo "Starting Triton Inference Server"
 echo "=================================================="
 echo "Model repository: $MODEL_REPO"
+echo "Triton image: $TRITON_IMAGE"
+echo "GPU runtime args: ${GPU_RUNTIME_ARGS[*]}"
 echo "HTTP port: $HTTP_PORT"
 echo "gRPC port: $GRPC_PORT"
 echo "Metrics port: $METRICS_PORT"
@@ -42,8 +55,8 @@ fi
 
 # Start Triton server
 echo "Starting Triton server container..."
-docker run --rm -d \
-    --gpus all \
+docker run -d \
+    "${GPU_RUNTIME_ARGS[@]}" \
     --name $CONTAINER_NAME \
     --shm-size=1g \
     --ulimit memlock=-1 \
@@ -57,18 +70,17 @@ docker run --rm -d \
         --model-repository=/models \
         --log-verbose=1 \
         --strict-model-config=false \
-        --model-control-mode=poll \
-        --repository-poll-secs=30
+        --model-control-mode=explicit \
+        --load-model=$MODEL_NAME
 
 echo "Container started: $CONTAINER_NAME"
 echo ""
 
 # Wait for server to be ready
 echo "Waiting for Triton server to be ready..."
-MAX_RETRIES=30
 RETRY_COUNT=0
 
-until curl -s http://localhost:$HTTP_PORT/v2/health/ready | grep -q "true"; do
+until curl -sf http://localhost:$HTTP_PORT/v2/health/ready >/dev/null; do
     RETRY_COUNT=$((RETRY_COUNT + 1))
     if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
         echo "ERROR: Triton server failed to start within timeout"
@@ -87,7 +99,7 @@ echo "=================================================="
 # Check model status
 echo ""
 echo "Model status:"
-curl -s http://localhost:$HTTP_PORT/v2/models/swin_base_reid | python3 -m json.tool || echo "WARNING: Model swin_base_reid not loaded"
+curl -s http://localhost:$HTTP_PORT/v2/models/$MODEL_NAME | python3 -m json.tool || echo "WARNING: Model $MODEL_NAME not loaded"
 
 echo ""
 echo "=================================================="

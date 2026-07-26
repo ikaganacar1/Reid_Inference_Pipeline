@@ -4,9 +4,8 @@
 model:
   path: "models/yoloe-26x-seg.pt"
   device: "cuda:0"
-  # Two-class open-vocabulary detection.
-  # YOLOE uses CLIP to classify each detected box as one of these labels.
-  text_prompts: ["person", "intruder"]
+  # YOLOE uses CLIP to classify each detected box with the configured labels.
+  text_prompts: ["person"]
 
 detection:
   conf_threshold: 0.4   # slightly lower than yolo11n — YOLOE is more conservative

@@ -1,7 +1,7 @@
 """
 YOLOE-26x Open-Vocabulary Detector
-Text-prompted detection with two classes: "person" and "intruder".
-YOLOE uses CLIP to classify each detected box as one or the other.
+Text-prompted detection using labels configured in configs/yoloe_config.yaml.
+YOLOE uses CLIP to classify each detected box with one of those labels.
 ReID (Swin Base via Triton) then handles cross-camera re-identification.
 
 Same detect() interface as YOLOPersonDetector, plus segmentation masks.
@@ -52,8 +52,7 @@ class YOLOEPersonDetector:
         """
         Returns:
             detections: [N, 6] (x1, y1, x2, y2, conf, cls)
-                        cls=0 → self.text_prompts[0]  ("person")
-                        cls=1 → self.text_prompts[1]  ("intruder")
+                        cls indexes self.text_prompts
             crops:      BGR person crops for ReID
             masks:      binary [H,W] segmentation mask per detection, or None
         """
@@ -68,7 +67,7 @@ class YOLOEPersonDetector:
         )[0]
 
         if len(results.boxes) == 0:
-            return np.array([]), [], []
+            return np.empty((0, 6), dtype=np.float32), [], []
 
         boxes  = results.boxes.xyxy.cpu().numpy()
         scores = results.boxes.conf.cpu().numpy()
@@ -90,8 +89,10 @@ class YOLOEPersonDetector:
         # Person crops for ReID
         crops = []
         for x1, y1, x2, y2, _, _ in dets:
-            x1 = max(0, int(x1)); y1 = max(0, int(y1))
-            x2 = min(W, int(x2)); y2 = min(H, int(y2))
+            x1 = max(0, int(x1))
+            y1 = max(0, int(y1))
+            x2 = min(W, int(x2))
+            y2 = min(H, int(y2))
             crops.append(frame[y1:y2, x1:x2] if x2 > x1 and y2 > y1
                          else np.zeros((1, 1, 3), dtype=np.uint8))
 

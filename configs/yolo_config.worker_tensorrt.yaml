@@ -1,0 +1,15 @@
+# Optional low-latency worker profile for an engine built on this exact Jetson.
+# TensorRT plans are not portable across arbitrary JetPack/TensorRT/GPU versions.
+model:
+  path: models/yolo11n.engine
+  device: cuda:0
+detection:
+  conf_threshold: 0.5
+  iou_threshold: 0.7
+  classes: [0]
+  imgsz: 640
+inference:
+  half: true
+  augment: false
+  agnostic_nms: false
+  max_det: 50

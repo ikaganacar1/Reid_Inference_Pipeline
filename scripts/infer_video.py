@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import shutil
 import subprocess
 import sys
 import time
@@ -22,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.detector import YOLOPersonDetector
 from src.yoloe_detector import YOLOEPersonDetector
-from src.reid_client import TritonReIDClient
+from src.reid_client import create_reid_client
 from src.tracker import ReIDTracker
 from src.utils.config_loader import load_all_configs
 
@@ -46,6 +47,14 @@ _PALETTE = [
 
 def cls_color(cls_idx: int) -> tuple:
     return _PALETTE[int(cls_idx) % len(_PALETTE)]
+
+
+def mask_for_track(track, masks):
+    """Return the mask associated with BoTSORT's original detection index."""
+    if len(track) < 8:
+        return None
+    det_idx = int(track[7])
+    return masks[det_idx] if 0 <= det_idx < len(masks) else None
 
 
 # ─── Drawing ───────────────────────────────────────────────────────────────────
@@ -104,8 +113,10 @@ def draw_hud(frame, prompts, frame_idx, fps, n_tracks):
 
 
 def h264_encode(src: Path, dst: Path):
-    ffmpeg = next((p for p in ["/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg", "ffmpeg"]
-                   if Path(p).exists() or p == "ffmpeg"), "ffmpeg")
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise RuntimeError("ffmpeg was not found on PATH")
+
     for codec in ["h264_nvenc", "libx264", "libopenh264"]:
         try:
             subprocess.run([ffmpeg, "-y", "-i", str(src),
@@ -115,7 +126,8 @@ def h264_encode(src: Path, dst: Path):
             return
         except subprocess.CalledProcessError:
             continue
-    src.rename(dst)
+
+    src.replace(dst)
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -144,6 +156,7 @@ def main():
     else:
         suffix = "yoloe" if is_yoloe else "yolo11n"
         out_path = Path("outputs") / f"{video_path.stem}_{suffix}.mp4"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = out_path.with_suffix('.raw.mp4')
 
     print("=" * 55)
@@ -151,7 +164,8 @@ def main():
     print(f"  Video  : {video_path}")
     print(f"  Output : {out_path}")
     print(f"  Prompts: {prompts}")
-    print(f"  ReID   : {'disabled' if args.no_reid else 'Swin Base via Triton'}")
+    reid_backend = configs['reid'].get('backend', 'triton')
+    print(f"  ReID   : {'disabled' if args.no_reid else reid_backend}")
     print("=" * 55)
 
     # ── Init ──────────────────────────────────────────────────────────────
@@ -163,73 +177,89 @@ def main():
 
     reid_client = None
     if not args.no_reid:
-        reid_client = TritonReIDClient(configs['reid'])
+        reid_client = create_reid_client(configs['reid'])
 
-    tracker = ReIDTracker(configs['tracker'])
+    tracker = ReIDTracker(configs['tracker'], with_reid=not args.no_reid)
 
     # ── Open video ────────────────────────────────────────────────────────
     cap     = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Failed to open input video: {video_path}")
     fps     = cap.get(cv2.CAP_PROP_FPS)
     width   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height  = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total   = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     if args.max_frames:
         total = min(total, args.max_frames)
+    if fps <= 0 or width <= 0 or height <= 0:
+        cap.release()
+        raise RuntimeError(
+            f"Invalid video metadata for {video_path}: {width}x{height} at {fps} FPS"
+        )
 
     print(f"\n  {width}×{height} @ {fps:.2f} fps  ({total} frames)\n")
 
     writer = cv2.VideoWriter(str(tmp_path), cv2.VideoWriter_fourcc(*'mp4v'),
                              fps, (width, height))
+    if not writer.isOpened():
+        cap.release()
+        raise RuntimeError(f"Failed to open output video writer: {tmp_path}")
 
     # ── Process ───────────────────────────────────────────────────────────
     det_times, total_dets = [], 0
     t0 = time.time()
 
-    for fidx in range(total):
-        ret, frame = cap.read()
-        if not ret:
-            break
+    processed_frames = 0
+    try:
+        for fidx in range(total):
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-        t_d = time.time()
-        if is_yoloe:
-            dets, crops, masks = detector.detect(frame)
-        else:
-            dets, crops = detector.detect(frame)
-            masks = [None] * len(dets)
-        det_times.append(time.time() - t_d)
-        total_dets += len(dets)
+            t_d = time.time()
+            if is_yoloe:
+                dets, crops, masks = detector.detect(frame)
+            else:
+                dets, crops = detector.detect(frame)
+                masks = [None] * len(dets)
+            det_times.append(time.time() - t_d)
+            total_dets += len(dets)
 
-        if reid_client and len(crops) > 0:
-            embs = reid_client.infer(crops)
-        else:
-            embs = np.empty((0, 0))
+            if reid_client and len(crops) > 0:
+                embs = reid_client.infer(crops)
+            else:
+                embs = np.empty((0, 0))
 
-        tracks = tracker.update(dets, frame, embs)
+            tracks = tracker.update(dets, frame, embs)
 
-        # Draw
-        for i, t in enumerate(tracks):
-            mask = masks[i] if i < len(masks) else None
-            draw_track(frame, t, prompts, mask=mask)
+            # Draw
+            for track in tracks:
+                draw_track(frame, track, prompts, mask=mask_for_track(track, masks))
 
-        draw_hud(frame, prompts, fidx + 1, fps, len(tracks))
-        writer.write(frame)
+            draw_hud(frame, prompts, fidx + 1, fps, len(tracks))
+            writer.write(frame)
+            processed_frames += 1
 
-        if (fidx + 1) % 100 == 0:
-            elapsed = time.time() - t0
-            fps_so_far = (fidx + 1) / elapsed
-            print(f"  frame {fidx+1}/{total}  |  dets={len(dets)}  tracks={len(tracks)}"
-                  f"  |  {fps_so_far:.1f} fps")
-
-    cap.release()
-    writer.release()
+            if (fidx + 1) % 100 == 0:
+                elapsed = time.time() - t0
+                fps_so_far = (fidx + 1) / elapsed
+                print(f"  frame {fidx+1}/{total}  |  dets={len(dets)}  tracks={len(tracks)}"
+                      f"  |  {fps_so_far:.1f} fps")
+    finally:
+        cap.release()
+        writer.release()
+        if reid_client is not None:
+            reid_client.close()
     elapsed = time.time() - t0
+    if processed_frames == 0:
+        raise RuntimeError(f"No frames were decoded from input video: {video_path}")
 
     # ── Encode ────────────────────────────────────────────────────────────
-    print(f"\nRe-encoding to H.264…")
+    print("\nRe-encoding to H.264…")
     h264_encode(tmp_path, out_path)
 
     print(f"\n{'='*55}")
-    print(f" Done in {elapsed:.1f}s  ({(fidx+1)/elapsed:.1f} fps)")
+    print(f" Done in {elapsed:.1f}s  ({processed_frames/elapsed:.1f} fps)")
     print(f" Total detections : {total_dets}")
     print(f" Avg det time     : {np.mean(det_times)*1000:.1f} ms")
     print(f" Output           : {out_path}")

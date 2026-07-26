@@ -12,12 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import yaml
-from src.detector import YOLOPersonDetector
-from src.reid_client import TritonReIDClient
-from src.tracker import ReIDTracker
 from src.logger import ExperimentLogger
-from src.utils.visualization import Visualizer
-from src.utils.metrics import PerformanceMetrics
 from src.pipeline import ReIDPipeline
 
 

@@ -73,7 +73,7 @@ docker logs -f triton-reid-server
 docker stop triton-reid-server
 
 # Check model status
-curl http://localhost:8100/v2/models/lttc_reid
+curl http://localhost:8100/v2/models/swin_base_reid
 ```
 
 ---
@@ -91,8 +91,9 @@ detection:
 ```yaml
 # configs/tracker_config.yaml
 botsort:
-  max_age: 30          # Keep tracks for 30 frames
-  appearance_thresh: 0.25  # Embedding similarity (0-1)
+  track_buffer: 30          # About 3 seconds at the 10 FPS realtime target
+  proximity_thresh: 0.5     # Require spatial support for local association
+  appearance_thresh: 0.3    # Maximum local cosine distance
 ```
 
 ### Pipeline Settings
@@ -101,7 +102,7 @@ botsort:
 logging:
   log_every_n_frames: 30  # Less frequent = faster
 processing:
-  skip_frames: 0  # 0=all, 2=every 3rd frame
+  batch_size: 8  # Maximum crops passed to one configured ReID request
 ```
 
 ---
@@ -112,7 +113,7 @@ processing:
 experiments/test001/
 ├── tracked.mp4              # Annotated video with track IDs
 ├── detections.jsonl         # All detections per frame
-├── embeddings.jsonl         # 256-dim vectors for each person
+├── embeddings.jsonl         # Optional 1024-dim vectors for each person
 ├── tracks.jsonl             # Track assignments per frame
 ├── metrics.jsonl            # FPS, GPU usage, latency
 ├── config_snapshot.json     # Configs used for run
@@ -156,9 +157,9 @@ ffmpeg -i input.mp4 -vf "scale=1280:720" input_720p.mp4
 # Edit configs/yolo_config.yaml:
 # path: "models/yolo8n.pt"
 
-# 3. Skip frames
+# 3. Disable expensive embedding-vector logging
 # Edit configs/pipeline_config.yaml:
-# skip_frames: 2  # Every 3rd frame
+# save_embeddings: false
 ```
 
 ### GPU Out of Memory?

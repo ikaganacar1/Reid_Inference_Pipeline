@@ -1,0 +1,22 @@
+[Unit]
+Description=Realtime ReID camera worker control
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_DIR@
+EnvironmentFile=-@ENV_FILE@
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHON_BIN=@PYTHON_BIN@
+Environment=REALTIME_CONFIG=@REALTIME_CONFIG@
+Environment=YOLO_CONFIG=@YOLO_CONFIG@
+ExecStartPre=@PYTHON_BIN@ scripts/jetson_preflight.py --role worker --realtime-config @REALTIME_CONFIG@ --yolo-config @YOLO_CONFIG@ --load-models --check-camera
+ExecStart=@PYTHON_BIN@ -u scripts/realtime_worker_control.py --config @REALTIME_CONFIG@ --repo-dir @REPO_DIR@
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillMode=control-group
+
+[Install]
+WantedBy=default.target
