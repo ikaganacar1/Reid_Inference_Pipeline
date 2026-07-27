@@ -1,210 +1,420 @@
-# YOLO + TAO ReID Inference Pipeline
+# Distributed Multi-Camera Person Re-Identification
 
-A person re-identification pipeline integrating YOLO person detection,
-TAO-trained ReID models, BoxMOT tracking, synchronized offline replay, and a
-distributed realtime Jetson deployment.
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Edge runtime](https://img.shields.io/badge/Edge-NVIDIA_Jetson-76B900?logo=nvidia)](docs/JETSON_DEPLOYMENT.md)
+[![Detector](https://img.shields.io/badge/Detector-YOLO26m-111827)](configs/yolo_config.yaml)
+[![ReID](https://img.shields.io/badge/ReID-TAO_Swin_Base_1024-2F6FEB)](configs/reid_config.yaml)
+[![Runtime](https://img.shields.io/badge/ReID_Runtime-ONNX_Runtime_CUDA-0F766E)](src/onnx_reid_client.py)
+[![Training experiments](https://img.shields.io/badge/Training_%26_Experiments-Companion_Repository-B45309)](https://github.com/sh4gen/Synthetic-Data-Enhanced-Multi-Camera-Intruder-Detection-Using-Edge-AI)
 
-> **Realtime Jetson path:** the active prime uses ONNX Runtime CUDA directly,
-> not Triton. Start with [docs/JETSON_DEPLOYMENT.md](docs/JETSON_DEPLOYMENT.md).
-> Triton remains available for legacy/offline configurations only.
+A realtime person ReID runtime for distributed camera networks. Camera workers
+run person detection close to each video source; a prime node batches person
+crops, extracts appearance embeddings, tracks each camera independently, and
+assigns one global ID across the camera network.
 
-## Architecture
+The repository also includes synchronized multi-camera replay, transition
+auditing, identity crop-video export, dataset evaluation, model import tools,
+and fail-fast Jetson deployment checks.
 
+![Multi-camera ReID pipeline architecture](docs/assets/figure_2_reid_pipeline_architecture.png)
+
+> **Architecture figure:** this is a conceptual view of the complete pipeline.
+> The checked-in realtime default runs `yolo26m.pt` through Ultralytics CUDA and
+> the generalized Swin model through direct ONNX Runtime CUDA. TensorRT is an
+> optional backend, not a requirement for the active deployment.
+
+## Contents
+
+- [Repository Scope](#repository-scope)
+- [Implemented Architecture](#implemented-architecture)
+- [How Global ReID Works](#how-global-reid-works)
+- [Models And Backends](#models-and-backends)
+- [Configuration](#configuration)
+- [Workstation Quick Start](#workstation-quick-start)
+- [Multi-Jetson Deployment](#multi-jetson-deployment)
+- [Dashboard And Operations](#dashboard-and-operations)
+- [Camera Topology](#camera-topology)
+- [Recording](#recording)
+- [Offline Multi-Camera Evaluation](#offline-multi-camera-evaluation)
+- [Single-Video Pipeline](#single-video-pipeline)
+- [Testing And Validation](#testing-and-validation)
+- [Project Layout](#project-layout)
+- [Operational Limits](#operational-limits)
+- [Training Experiments And Citation](#training-experiments-and-citation)
+
+## Repository Scope
+
+This repository is the maintained **inference, orchestration, evaluation, and
+Jetson deployment runtime**. It does not contain training datasets or model
+weights.
+
+The generalized Swin checkpoint consumed here was trained and evaluated in the
+companion research repository:
+
+[Synthetic Data Enhanced Multi-Camera Intruder Detection Using Edge AI](https://github.com/sh4gen/Synthetic-Data-Enhanced-Multi-Camera-Intruder-Detection-Using-Edge-AI)
+
+The two repositories have separate responsibilities:
+
+| Repository | Responsibility |
+| --- | --- |
+| This repository | Realtime workers, prime server, ReID inference, tracking, global identity logic, dashboard, recording, replay, and deployment |
+| Companion experiment repository | Synthetic-data preparation, TAO Swin training, checkpoint evaluation, reports, and research results |
+
+Large checkpoints, videos, recordings, crops, and experiment outputs are
+ignored by Git. They must be staged separately on each machine.
+
+## Implemented Architecture
+
+```text
+Camera worker, one process per camera
+
+camera / RTSP stream
+        |
+        v
+OpenCV capture
+        |
+        v
+YOLO26m person detection on CUDA
+        |
+        +-- full-frame JPEG
+        +-- [x1, y1, x2, y2, confidence, class]
+        `-- one JPEG crop per detection
+                         |
+                         v
+              binary WebSocket packet
+                         |
+                         v
+Prime node
+
+bounded ingest queue -> short arrival-time microbatch
+        |
+        v
+decode crops -> generalized Swin ReID on ONNX Runtime CUDA
+        |
+        v
+one BoTSORT instance per camera
+        |
+        v
+quality gates + temporal confirmation + global identity gallery
+        |
+        +-- annotated dashboard frames
+        +-- realtime metrics and worker controls
+        +-- segmented processed recordings
+        `-- optional ReID debug events and identity journeys
 ```
-Camera Orin: camera -> YOLO26m -> detections/crops -> WebSocket
-                                                      |
-Prime Orin:  ONNX Runtime CUDA ReID -> per-camera BoTSORT
-                                      -> global identity gallery
-                                      -> dashboard + segmented recordings
+
+### Worker Responsibilities
+
+Each [`RealtimeWorker`](src/realtime/worker.py):
+
+1. Opens one USB, numeric OpenCV, file, or RTSP source.
+2. Runs person-only YOLO inference.
+3. JPEG-encodes the original frame and every detected person crop.
+4. Packs detections and image payloads into the validated `RTP1` binary
+   protocol.
+5. Sends frames to the prime over `/ws/ingest`.
+6. Reopens the source and reconnects after capture or network failure.
+
+Workers do not run global ReID and do not decide global IDs.
+
+### Prime Responsibilities
+
+The [`RealtimePrimeServer`](src/realtime/prime_server.py):
+
+1. Accepts one active WebSocket owner per globally unique `camera_id`.
+2. Uses a bounded queue; when overloaded, the oldest queued packet is dropped
+   instead of allowing unbounded latency.
+3. Collects a short cross-camera microbatch and performs one bounded ReID call.
+4. Processes packets in capture-event-time order within each microbatch.
+5. Maintains an independent BoTSORT tracker for each camera.
+6. Maps camera-local tracks to global IDs with the shared identity assigner.
+7. Annotates frames, updates metrics, broadcasts to viewers, and records
+   segmented MP4 files.
+
+Slow dashboard clients have a send timeout and are disconnected instead of
+blocking inference or recording.
+
+## How Global ReID Works
+
+The pipeline deliberately separates **local tracking** from **global identity**.
+
+- A **local track ID** is created by one camera's BoTSORT instance. It handles
+  short-term motion, occlusion, and local association. It is internal and is not
+  shown to viewers.
+- A **global ID** is assigned by the prime gallery. The dashboard and processed
+  videos show it as `ID:<number>`.
+
+Global IDs are session-scoped labels, not names or permanent biometric
+identities. Numbering starts at `1` after a prime restart or gallery reset.
+
+### Assignment Stages
+
+1. **Detection quality gate**
+
+   Low-confidence, very small, low-area, and weak frame-edge observations do
+   not create or mutate an identity. A boundary-cut crop may hold an existing
+   ID but cannot seed a new one.
+
+2. **Temporal confirmation**
+
+   A new local track remains pending until it has enough observations and
+   elapsed time. The pending embedding is the normalized average of those
+   observations, reducing dependence on one backlit or partial crop.
+
+3. **Gallery matching**
+
+   Embeddings are L2-normalized and compared with cosine distance. Lower
+   distance means a closer appearance match. A candidate must satisfy the
+   configured distance gate and, when multiple candidates exist, the required
+   margin over the second-best candidate.
+
+4. **Conflict constraints**
+
+   Established visible IDs are reserved before new tracks are considered.
+   Sustained spatially separate tracks in the same camera become a persistent
+   cannot-link pair, preventing two proven-different people from later merging.
+   Duplicate near-identical local boxes are suppressed.
+
+5. **Camera topology**
+
+   A global ID cannot appear concurrently in ordinary non-overlapping cameras.
+   Declared overlap pairs may share an ID simultaneously after confirmation.
+   Declared adjacent pairs allow a fast sequential handoff but never
+   simultaneous presence.
+
+6. **Bounded identity memory**
+
+   The gallery stores bounded per-camera-track prototypes rather than only one
+   continuously overwritten vector. This preserves earlier viewpoints while
+   bounding memory. Entries expire after the configured TTL.
+
+7. **Conservative remapping**
+
+   Existing local tracks keep continuity through temporary appearance drift.
+   A remap requires a clearly better candidate and sufficient margin; an
+   edge-partial crop is not allowed to authorize the switch.
+
+The core policy is implemented in
+[`identity_assignment.py`](src/realtime/identity_assignment.py), with gallery
+state in [`identity_gallery.py`](src/realtime/identity_gallery.py) and physical
+camera relations in
+[`camera_topology.py`](src/realtime/camera_topology.py).
+
+## Models And Backends
+
+| Stage | Active default | Runtime contract |
+| --- | --- | --- |
+| Person detector | `yolo26m.pt` | CUDA, FP16, 640 input, COCO person class `0`, confidence `0.50`, IoU `0.70` |
+| ReID | `generalized_reid_swin_epoch119.onnx` | Input `input`: dynamic batch x 3 x 256 x 128; output `fc_pred`: batch x 1024 |
+| Local tracker | BoxMOT BoTSORT | One tracker per camera, external ReID embeddings, 30-frame lost-track buffer |
+| Global matching | In-process identity gallery | Cosine distance, temporal confirmation, topology and cannot-link constraints |
+
+The ReID preprocessing must match training:
+
+```text
+BGR crop -> resize 256x128 -> RGB -> float32 / 255
+         -> normalize with mean=[0.5, 0.5, 0.5]
+                           std =[0.5, 0.5, 0.5]
+         -> CHW tensor
 ```
 
-### Components
+Supported ReID backends:
 
-1. **YOLO26m Person Detector** - Detects persons and extracts crops
-2. **Generalized Swin ReID Model** - Extracts 1024-dim embeddings through direct ONNX Runtime CUDA in realtime
-3. **BoxMOT (BoTSORT)** - Multi-object tracking with appearance-based re-identification
-4. **Experimental Logger** - Comprehensive logging for reproducibility
+| `REID_BACKEND` | Status |
+| --- | --- |
+| `onnxruntime_direct` | Active default; in-process ONNX Runtime CUDA |
+| `tensorrt_direct` | Optional in-process TensorRT engine |
+| `triton` | Optional legacy/offline server path |
 
-## Features
+Deployment model sizes and SHA-256 values are pinned in
+[`deploy/model_manifest.yaml`](deploy/model_manifest.yaml). Jetson preflight
+rejects missing, partial, or different deployment checkpoints.
 
-- Real-time person re-identification across camera exits/entries
-- GPU ONNX Runtime inference for the active ReID model
-- Bounded frame-level ReID request chunking
-- Appearance-based matching for long-term tracking
-- Bounded local lost-track retention
-- Comprehensive experimental logging (detections, embeddings, tracks, metrics)
-- Model versioning with SHA256 hashing
-- Video visualization with track IDs
-- Dataset evaluation tools (mAP, CMC metrics)
-
-## Quick Start
-
-### 1. Setup Environment
-
-```bash
-# Activate conda environment
-conda activate tensorrt_blackwell
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-This quick start is for a workstation. Jetsons must use the role-specific
-installer in [docs/JETSON_DEPLOYMENT.md](docs/JETSON_DEPLOYMENT.md) so generic
-pip packages do not replace JetPack's CUDA-enabled PyTorch and OpenCV.
-
-### 2. Optional Legacy Triton Server
-
-```bash
-# Only for a config whose ReID backend is explicitly set to Triton.
-bash scripts/start_triton_server.sh
-
-# Verify model is loaded
-curl http://localhost:8100/v2/models/swin_base_reid
-```
-
-### 3. Validate Setup
-
-```bash
-# Validate all components
-python scripts/validate_models.py
-```
-
-### 4. Run Pipeline
-
-```bash
-# Process a video
-python main.py \
-    --video data/videos/your_video.mp4 \
-    --experiment-name my_test_run
-```
-
-## Directory Structure
-
-```
-Reid_Inference_Pipeline/
-├── configs/                    # Configuration files
-│   ├── yolo_config.yaml       # YOLO detection settings
-│   ├── reid_config.yaml       # ReID backend and preprocessing
-│   ├── tracker_config.yaml    # BoxMOT tracker settings
-│   ├── pipeline_config.yaml   # Pipeline orchestration
-│   └── evaluation_config.yaml # Dataset evaluation settings
-│
-├── deploy/                     # Jetson service templates and model manifest
-├── triton_models/              # Optional legacy Triton model repository
-│
-├── src/                        # Source code
-│   ├── detector.py            # YOLO wrapper
-│   ├── reid_client.py         # ReID backend factory / Triton client
-│   ├── onnx_reid_client.py    # Active direct ONNX Runtime backend
-│   ├── realtime/              # Distributed worker, prime, and global IDs
-│   ├── tracker.py             # BoxMOT integration with external ReID
-│   ├── logger.py              # Experimental logging
-│   ├── pipeline.py            # Main orchestration
-│   ├── evaluation/            # Dataset evaluation module
-│   │   ├── dataset.py         # Market1501/LTCC dataset loader
-│   │   ├── metrics.py         # CMC and mAP computation
-│   │   └── evaluator.py       # Main evaluator
-│   └── utils/                 # Utilities
-│
-├── scripts/                    # Helper scripts
-│   ├── export_to_tensorrt.py  # ONNX → TensorRT converter
-│   ├── setup_triton_model.py  # Triton model repo setup
-│   ├── start_triton_server.sh # Triton server launcher
-│   ├── validate_models.py     # Model validation
-│   ├── import_model.py        # Import new ReID models
-│   ├── evaluate_dataset.py    # Dataset evaluation
-│   └── benchmark_triton_model.py # Performance benchmarking
-│
-├── docs/                       # Documentation
-│   ├── IMPORTING_MODELS.md    # Guide for importing new models
-│   └── MODEL_IMPORT_QUICKSTART.md # Quick reference
-│
-├── experiments/                # Experiment logs
-│   └── <experiment_name>/     # Per-run results
-│
-├── main.py                     # Main CLI entry point
-├── requirements.txt            # Workstation dependencies
-├── requirements_*_jetson.txt   # Jetson role dependencies
-└── README.md                   # This file
-```
+Ultralytics may download a known detector checkpoint on first workstation use,
+but unattended Jetson deployment must stage the exact detector file in advance.
+The ReID checkpoint is never installed by `pip`.
 
 ## Configuration
 
-### ReID Configuration (`configs/reid_config.yaml`)
-
-```yaml
-backend: "onnxruntime_direct"
-
-model:
-  onnx_path: "TwinProject_models/reid_generalized_yolo11n/generalized_reid_swin_epoch119.onnx"
-  input_shape: [256, 128]  # H x W
-  embedding_dim: 1024
-
-preprocessing:
-  mean: [0.5, 0.5, 0.5]
-  std: [0.5, 0.5, 0.5]
-
-onnxruntime:
-  providers: ["CUDAExecutionProvider", "CPUExecutionProvider"]
-```
-
-### Tracker Configuration (`configs/tracker_config.yaml`)
-
-```yaml
-botsort:
-  # Re-identification settings
-  with_reid: true           # Enable appearance-based matching
-  proximity_thresh: 0.5     # Require spatial support for local matching
-  appearance_thresh: 0.3    # Strict local embedding distance
-  track_buffer: 30          # About 3 seconds at the 10 FPS target
-
-  # Standard tracking parameters
-  track_high_thresh: 0.5
-  track_low_thresh: 0.1
-  new_track_thresh: 0.5
-  match_thresh: 0.8
-```
-
-**Key settings for re-identification:**
-- `with_reid: true` - Enables appearance-based matching using ReID embeddings
-- `proximity_thresh: 0.5` - Keeps local association spatially constrained
-- `track_buffer: 30` - Retains a lost local track for about three seconds at 10 FPS
-- `appearance_thresh: 0.3` - Cosine distance threshold (higher is more lenient)
-
-Long-gap and cross-camera identity are handled by the global gallery, not by
-keeping stale local motion tracks alive.
-
-## Usage Examples
-
-### Basic Usage
+Checked-in YAML files provide versioned defaults. Device-specific values belong
+in one private repository-local `.env`, created from
+[`.env.example`](.env.example).
 
 ```bash
-# Process single video
-python main.py --video test_video.mp4
+# Prime node
+scripts/reidctl.sh init prime
+
+# Camera-only worker node
+scripts/reidctl.sh init worker
 ```
 
-### Realtime Multi-Jetson Mode
+The generated `.env` is ignored by Git and created with mode `0600`. Keep RTSP
+credentials and private network addresses only in this file.
 
-Every device is configured from one private, repository-local `.env` file.
-YAML files remain internal defaults; normal deployment does not require editing
-them or passing startup arguments.
+### Minimum Prime Configuration
+
+```dotenv
+PIPELINE_ROLE=prime
+LOCAL_CAMERA_ENABLED=true
+
+PRIME_URL=ws://192.0.2.10:8765
+CAMERA_IDS=cam1
+
+YOLO_MODEL_PATH=~/TwinProject_models/reid_generalized_yolo11n/yolo26m.pt
+REID_MODEL_PATH=~/TwinProject_models/reid_generalized_yolo11n/generalized_reid_swin_epoch119.onnx
+
+WORKER_NODES=prime=http://127.0.0.1:8787,worker=http://192.0.2.11:8787
+REALTIME_OUTPUT_DIR=outputs/realtime
+```
+
+### Minimum Worker Configuration
+
+```dotenv
+PIPELINE_ROLE=worker
+PRIME_URL=ws://192.0.2.10:8765
+CAMERA_IDS=cam2
+YOLO_MODEL_PATH=~/TwinProject_models/reid_generalized_yolo11n/yolo26m.pt
+```
+
+`192.0.2.x` addresses are documentation placeholders. Replace them with the
+actual trusted-LAN addresses.
+
+### Camera Mapping
+
+For automatic USB discovery, leave `CAMERA_SOURCES` empty and provide exactly
+one global ID for every camera expected on that device:
+
+```dotenv
+CAMERA_AUTO_SCAN=true
+CAMERA_IDS=cam2,cam3,cam4
+```
+
+For fixed device paths or RTSP sources:
+
+```dotenv
+CAMERA_AUTO_SCAN=false
+CAMERA_IDS=cam2,cam3
+CAMERA_SOURCES="/dev/v4l/by-path/source-a,/dev/v4l/by-path/source-b"
+```
+
+Source count and camera-ID count must match. This strict mapping prevents a
+reconnected camera from silently acquiring an ID already used by another
+device.
+
+The full operator-facing variable list is documented inline in
+[`.env.example`](.env.example). The Python loader performs explicit boolean,
+integer, float, list, camera-source, and topology-pair parsing and fails early
+on invalid values.
+
+## Workstation Quick Start
+
+This path is for x86_64 development and offline evaluation. Jetsons require the
+role-specific process in the next section.
+
+```bash
+git clone https://github.com/ikaganacar1/Reid_Inference_Pipeline.git
+cd Reid_Inference_Pipeline
+
+conda create -n reid-runtime python=3.10 -y
+conda activate reid-runtime
+python -m pip install -r requirements.txt
+```
+
+Stage the detector and ReID model, then initialize `.env`:
+
+```bash
+scripts/reidctl.sh init prime
+# Edit .env and set model paths, camera IDs, and network/output settings.
+
+scripts/reidctl.sh smoke --load-models
+scripts/reidctl.sh start
+scripts/reidctl.sh status
+```
+
+Open:
+
+```text
+http://<prime-ip>:8765/
+```
+
+The smoke test validates typed configuration, selected YAML files, protocol
+serialization, a localhost WebSocket round trip, gallery behavior, and, with
+`--load-models`, real detector/ReID/tracker initialization.
+
+## Multi-Jetson Deployment
+
+The active reference layout is one prime Orin plus one or more camera workers.
+A prime may also host a local camera worker:
+
+```text
+prime Orin:
+  prime server + ONNX ReID + per-camera trackers + global IDs
+  dashboard + recording
+  optional local YOLO camera worker
+
+worker Orin:
+  one YOLO worker process per connected camera
+  worker control API
+```
+
+### Platform Boundary
+
+The repository installer does **not** install or upgrade JetPack, CUDA, cuDNN,
+TensorRT, GPU drivers, Jetson PyTorch, torchvision, or the NVIDIA camera stack.
+Those packages must already be compatible and working as one JetPack unit.
+
+The active ONNX path does not require Triton or a ReID TensorRT engine.
+
+### Install Runtime
+
+Prime:
+
+```bash
+ORT_WHEEL=/absolute/path/to/jetpack-matched-onnxruntime-gpu.whl \
+  scripts/install_jetson_runtime.sh prime
+```
+
+Worker:
+
+```bash
+scripts/install_jetson_runtime.sh worker
+```
+
+The installer creates `.venv-jetson` with `--system-site-packages` so JetPack's
+CUDA-enabled PyTorch and OpenCV remain authoritative. Ultralytics and BoxMOT
+are installed without dependency resolution to prevent generic wheels from
+replacing the JetPack builds.
+
+### Validate And Start
+
+Run on every device after editing its `.env`:
+
+```bash
+scripts/reidctl.sh smoke --load-models
+scripts/reidctl.sh preflight
+scripts/reidctl.sh start
+```
+
+Start the prime before remote workers. For boot-time operation:
 
 ```bash
 # Prime device
-scripts/reidctl.sh init prime
-# Edit .env: PRIME_URL, CAMERA_IDS, model paths, and recording path.
-scripts/reidctl.sh smoke --load-models
-scripts/reidctl.sh start
+scripts/install_jetson_services.sh prime --enable
 
 # Worker device
-scripts/reidctl.sh init worker
-# Edit .env: PRIME_URL, CAMERA_IDS, and YOLO_MODEL_PATH.
-scripts/reidctl.sh smoke --load-models
-scripts/reidctl.sh start
+scripts/install_jetson_services.sh worker --enable
+
+# Once per device, if services must run before interactive login
+sudo loginctl enable-linger "$USER"
 ```
 
-Operation is also centralized:
+The complete installation, model staging, integrity verification, GPU checks,
+camera checks, and systemd workflow is in
+[`docs/JETSON_DEPLOYMENT.md`](docs/JETSON_DEPLOYMENT.md).
+
+## Dashboard And Operations
+
+Common commands are identical on both roles:
 
 ```bash
 scripts/reidctl.sh status
@@ -213,163 +423,285 @@ scripts/reidctl.sh restart
 scripts/reidctl.sh stop
 ```
 
-See [docs/REALTIME_PIPELINE.md](docs/REALTIME_PIPELINE.md) for the network
-layout, worker commands, browser viewer, and recording behavior. Use
-[docs/JETSON_DEPLOYMENT.md](docs/JETSON_DEPLOYMENT.md) for installation,
-preflight, model staging, and boot services.
+| Endpoint | Purpose |
+| --- | --- |
+| `http://<prime>:8765/` | Dynamic live dashboard |
+| `http://<prime>:8765/status` | Prime, camera, queue, gallery, viewer, and recording metrics |
+| `ws://<prime>:8765/ws/ingest` | Worker frame ingest |
+| `ws://<prime>:8765/ws/view` | Annotated viewer stream |
+| `http://<worker>:8787/status` | Camera discovery, worker processes, logs, and sent FPS |
+| `http://<worker>:8787/control` | Start, stop, restart, scan, and scan/restart actions |
 
-### Custom Experiment Name
+The dashboard:
+
+- removes offline camera cards automatically;
+- fills the available area dynamically, using a 2x2 grid for three or four
+  cameras;
+- reports camera FPS, detections, tracks, ReID time, tracking time, total
+  processing time, queue use, packet drops, viewer count, gallery size, and
+  recording state;
+- proxies start, stop, and scan/restart actions to configured worker nodes;
+- can reset the in-memory identity gallery or stop the prime.
+
+USB discovery prefers stable `/dev/v4l/by-path/*video-index0` names. The worker
+control loop rescans and restarts workers after unplug/replug or a USB-port
+change. A dashboard stop action disables automatic restart until an explicit
+start or restart.
+
+## Camera Topology
+
+Physical topology is part of the ReID algorithm, not only deployment metadata.
+Configure it in `.env`:
+
+```dotenv
+# One person may be visible in both cameras at the same time.
+OVERLAPPING_CAMERA_PAIRS=cam1:cam2,cam3:cam4
+
+# Fast sequential route; simultaneous presence remains impossible.
+ADJACENT_CAMERA_PAIRS=cam2:cam3
+
+# Ordinary disjoint-camera exclusion window.
+CROSS_CAMERA_EXCLUSION_SECONDS=1.0
+ALLOW_ALL_CAMERA_OVERLAP=false
+```
+
+Use an overlap pair only when the physical fields of view genuinely overlap.
+Do not enable `ALLOW_ALL_CAMERA_OVERLAP` as a general fix for missed matches;
+it removes useful impossibility constraints and increases identity mixing when
+people wear similar clothing.
+
+See [`docs/REALTIME_PIPELINE.md`](docs/REALTIME_PIPELINE.md) for the detailed
+identity policy, camera recovery behavior, transport, dashboard, and recording
+design.
+
+## Recording
+
+The prime writes processed footage into a new session directory:
+
+```text
+outputs/realtime/recordings/<YYYYMMDD_HHMMSS>/
+  cam1_000001_processed.mp4
+  cam1_000002_processed.mp4
+  cam2_000001_processed.mp4
+```
+
+Default behavior:
+
+- OpenCV `mp4v` writer at `OUTPUT_FPS=10`;
+- one file per camera;
+- a new segment every 900 seconds;
+- recording pauses below the configured free-space reserve while inference and
+  live viewing continue;
+- recording resumes into a new segment after space is restored;
+- an optional required mountpoint prevents fallback writes to the root disk.
+
+Automatic deletion is intentionally not implemented. Production sites must
+define their own archive and retention policy.
+
+## Offline Multi-Camera Evaluation
+
+Use synchronized replay to test the same detector, ReID backend, BoTSORT
+wrapper, and global identity assigner on recordings captured at the same time:
 
 ```bash
-python main.py --video test_video.mp4 --experiment-name my_experiment
+RECORDINGS_ROOT=/path/to/recordings \
+SESSION=my_session \
+FILE_NAME=recording.mkv \
+REPLAY_FPS=25 \
+STRIDE=1 \
+OUTPUT_DIR=experiments/reid_audit \
+scripts/start_reid_debug.sh
 ```
 
-### Limit Frames (Testing)
+Replay advances by wall-clock time across cameras. It does not process one
+complete camera video and then the next unless `--sequential` is explicitly
+requested.
+
+Useful topology overrides:
 
 ```bash
-python main.py --video test_video.mp4 --max-frames 100
+OVERLAPPING_CAMERA_PAIRS=ch201:ch301,ch401:ch501 \
+ADJACENT_CAMERA_PAIRS=ch501:ch601 \
+scripts/start_reid_debug.sh
 ```
 
-### No Visualization (Faster)
+The run can produce:
+
+```text
+experiments/reid_audit/
+  annotated_videos/           # Global ID plus ReID distance/confidence
+  offline_tracks.jsonl        # Per-frame tracks and assignment decisions
+  reid_debug/events.jsonl     # Detailed ReID decisions
+  summary.json                # Counts and embedding diagnostics
+  cross_camera_analysis.json  # Journeys, conflicts, remaps, and near misses
+```
+
+Export one chronological crop video per global identity:
 
 ```bash
-python main.py --video test_video.mp4 --no-visualization
+python scripts/export_identity_videos.py \
+  experiments/reid_audit/offline_tracks.jsonl \
+  --recordings-root /path/to/recordings \
+  --session my_session \
+  --output-dir experiments/reid_audit/identity_videos \
+  --apply-edge-remap-guard
 ```
 
-## Dataset Evaluation
-
-Evaluate ReID model performance on Market1501-format datasets:
+Create transition-aware contact sheets after the identity-video manifest has
+been generated:
 
 ```bash
-# Evaluate on dataset
-python scripts/evaluate_dataset.py --data-root data --experiment-name eval_run
-
-# Re-evaluate from saved embeddings (faster)
-python scripts/evaluate_dataset.py --from-embeddings experiments/evaluation/eval_run
+python scripts/create_transition_contact_sheets.py \
+  experiments/reid_audit/reid_debug/events.jsonl \
+  --identity-manifest experiments/reid_audit/identity_videos/manifest.json \
+  --output-dir experiments/reid_audit/contact_sheets
 ```
 
-**Metrics:**
-- mAP (mean Average Precision) - Primary retrieval metric
-- CMC (Cumulative Matching Characteristics) - Rank-1, 5, 10, 20 accuracy
+These artifacts expose short identity splits and merges that can be missed
+when reviewing only sparsely sampled annotated videos.
 
-## Importing New Models
+## Single-Video Pipeline
 
-Import new ReID models to Triton:
+For one video and one local tracker:
 
 ```bash
-# Automated import with TensorRT conversion
-python scripts/import_model.py \
-    --onnx models/new_model.onnx \
-    --model-name new_model \
-    --test \
-    --benchmark
+python main.py \
+  --video /path/to/input.mp4 \
+  --experiment-name single_camera_test \
+  --max-frames 1000
 ```
 
-See `docs/IMPORTING_MODELS.md` for detailed guide or `docs/MODEL_IMPORT_QUICKSTART.md` for quick reference.
+This runner uses the YAML files in `configs/`, writes an annotated video unless
+`--no-visualization` is used, and records detections, embeddings metadata,
+tracks, metrics, model hashes, system information, and a configuration
+snapshot.
 
-## Experimental Logging
+It does not exercise the distributed WebSocket path or the cross-camera global
+gallery. Use synchronized replay for multi-camera ReID evaluation.
 
-Each pipeline run creates an experiment directory with:
+## Testing And Validation
 
-- `detections.jsonl` - Per-frame YOLO detections
-- `embeddings.jsonl` - ReID embeddings for each person
-- `tracks.jsonl` - Tracking results with track IDs
-- `metrics.jsonl` - Performance metrics (FPS, GPU memory, latency)
-- `config_snapshot.json` - Complete configuration used
-- `video_metadata.json` - Input video metadata
-
-### View Logs
+Run the unit and integration-style test suite:
 
 ```bash
-# View tracking results
-cat experiments/<name>/tracks.jsonl | jq '.tracks'
-
-# View performance metrics
-cat experiments/<name>/metrics.jsonl | jq '.fps'
+pytest -q
 ```
 
-## Performance
+Covered behavior includes:
 
-### Expected Performance (RTX 3090)
+- ReID preprocessing and detector duplicate suppression;
+- external-embedding BoTSORT integration;
+- binary packet validation and JPEG round trips;
+- bounded cross-camera gallery state;
+- temporal identity confirmation and quality gates;
+- overlap, adjacency, cross-camera exclusion, and cannot-link logic;
+- camera restart and worker source mapping;
+- microbatch event ordering, viewer timeouts, and recording rotation;
+- disk-pressure and mount-loss handling;
+- synchronized mixed-FPS replay, journey analysis, and identity exports;
+- `.env` parsing, typed overrides, smoke checks, and Jetson preflight.
 
-- **YOLO Detection**: ~6 ms per frame
-- **ReID Inference**: ~18 ms per batch
-- **Tracking**: ~8 ms per frame
-- **Overall FPS**: 30-40 FPS
-
-## Troubleshooting
-
-### Triton Server Not Starting
+Deployment validation is intentionally layered:
 
 ```bash
-# Check Docker logs
-docker logs triton-reid-server
+# Hardware-independent application checks
+scripts/reidctl.sh smoke --load-models
 
-# Verify model repository
-ls triton_models/swin_base_reid/
-
-# Restart server
-docker stop triton-reid-server
-bash scripts/start_triton_server.sh
+# Jetson platform, GPU, model hash, storage, clock, and camera checks
+scripts/reidctl.sh preflight
 ```
 
-### Track IDs Changing on Re-entry
+## Project Layout
 
-Ensure tracker config has:
-```yaml
-with_reid: true
-proximity_thresh: 0.5
-track_buffer: 30
+```text
+.
+|-- .env.example                 # Operator-facing runtime template
+|-- configs/                     # Versioned YAML defaults
+|-- deploy/
+|   |-- model_manifest.yaml      # Deployment model sizes and SHA-256 hashes
+|   `-- systemd/                 # Prime and camera service templates
+|-- docs/
+|   |-- assets/                  # README and architecture figures
+|   |-- JETSON_DEPLOYMENT.md     # Jetson installation and boot services
+|   `-- REALTIME_PIPELINE.md     # Detailed realtime behavior
+|-- scripts/
+|   |-- reidctl.sh               # Unified init/smoke/start/stop/status command
+|   |-- smoke_test.py            # Runtime data-path smoke test
+|   |-- jetson_preflight.py      # Hardware and deployment checks
+|   |-- realtime_prime.py        # Prime entrypoint
+|   |-- realtime_worker.py       # Camera worker entrypoint
+|   |-- realtime_worker_control.py
+|   |-- debug_reid_recordings.py # Synchronized multi-camera replay
+|   |-- analyze_cross_camera_reid.py
+|   |-- export_identity_videos.py
+|   `-- create_transition_contact_sheets.py
+|-- src/
+|   |-- detector.py              # Ultralytics or direct TensorRT YOLO
+|   |-- onnx_reid_client.py      # Active direct ONNX Runtime ReID backend
+|   |-- tensorrt_reid_client.py  # Optional direct TensorRT ReID backend
+|   |-- tracker.py               # External-embedding BoTSORT wrapper
+|   |-- runtime_config.py        # Shared typed .env/YAML configuration
+|   `-- realtime/
+|       |-- protocol.py
+|       |-- worker.py
+|       |-- worker_control.py
+|       |-- prime_server.py
+|       |-- identity_gallery.py
+|       |-- identity_assignment.py
+|       `-- camera_topology.py
+|-- tests/                       # Runtime and algorithm regression tests
+|-- triton_models/               # Optional legacy Triton repository metadata
+`-- main.py                      # Single-video pipeline entrypoint
 ```
 
-For longer retention or cross-camera deployments, use the global identity
-gallery instead of increasing the local BoTSORT buffer.
+Generated `experiments/`, `outputs/`, models, videos, crops, and logs are
+ignored by Git.
 
-### CUDA Out of Memory
+## Operational Limits
 
-- Reduce `max_batch` in `reid_config.yaml`
-- Reduce YOLO `imgsz` in `yolo_config.yaml`
+- **Trusted LAN only:** ports `8765` and `8787` currently have no
+  authentication or TLS termination. Do not expose them directly to the public
+  internet.
+- **Volatile identity state:** the global gallery is in memory. IDs do not
+  persist across a prime restart or manual gallery reset.
+- **Appearance is not identity proof:** uniforms, severe occlusion, lighting
+  shifts, and low-resolution crops can still cause splits or merges. Calibrate
+  thresholds with labeled journeys from the target camera network.
+- **Clock synchronization matters:** workers should use NTP or PTP. Capture
+  timestamps outside the configured skew bound fall back to prime receive time.
+- **Topology must be measured:** overlap, adjacency, and minimum travel times
+  are site-specific and cannot be inferred safely from model similarity alone.
+- **No automatic recording retention:** low-space protection pauses recording
+  but does not delete old footage.
+- **No repository-wide license file:** do not assume reuse rights beyond those
+  granted by dependencies, datasets, model providers, and project authors.
+- **Privacy and legal review:** person ReID can be sensitive biometric
+  processing. A deployment must follow applicable law, institutional policy,
+  access control, retention rules, and human-oversight requirements.
 
-## Development
+## Training Experiments And Citation
 
-### Testing Individual Components
+Model training, synthetic-data filtering, target-specific and generalized Swin
+experiments, checkpoint sweeps, and scientific reports are maintained in:
 
-```bash
-# Test YOLO detector
-python src/detector.py
+> [Synthetic Data Enhanced Multi-Camera Intruder Detection Using Edge AI](https://github.com/sh4gen/Synthetic-Data-Enhanced-Multi-Camera-Intruder-Detection-Using-Edge-AI)
 
-# Test ReID client (requires Triton running)
-python src/reid_client.py
+That repository documents the TAO Toolkit 6.0.0 Swin Base experiments over
+LTCC, DukeMTMC-reID, PRCC, and controlled synthetic augmentation. This runtime
+consumes the exported generalized model produced by that work.
 
-# Test tracker
-python src/tracker.py
+When using the model or experiment artifacts in research, cite the companion
+repository:
 
-# Test logger
-python src/logger.py
+```bibtex
+@misc{acar2026syntheticreid,
+  title  = {Synthetic Data Enhanced Multi-Camera Intruder Detection Using Edge AI},
+  author = {Acar, Ismail Kagan and Berbergil, Askin Ali},
+  year   = {2026},
+  url    = {https://github.com/sh4gen/Synthetic-Data-Enhanced-Multi-Camera-Intruder-Detection-Using-Edge-AI}
+}
 ```
 
-## License
-
-This project is provided as-is for research and development purposes.
-
-## Changelog
-
-### Version 0.4.0
-- Bounded local lost-track retention to prevent unbounded matching-state growth
-- Added bounded Triton request chunking and applied configured timeouts
-- Fixed IoU-only mode, YOLOE mask mapping, and track-history embedding mapping
-- Applied configured sparse optical-flow camera-motion compensation
-
-### Version 0.3.0
-- Switched to Swin Base ReID model (1024-dim embeddings)
-- Fixed re-identification for track persistence across camera exits/entries
-- Added appearance-based matching with configurable thresholds
-- Added unlimited track buffer for long-term tracking
-- Added dataset evaluation module (mAP, CMC metrics)
-- Added model import scripts for deploying new ReID models
-
-### Version 0.2.0
-- Initial implementation with Triton Inference Server
-- FP16 TensorRT engine support
-- BoxMOT tracking integration
-- Comprehensive experimental logging
+The runtime integrates NVIDIA TAO-trained ReID models, ONNX Runtime, optional
+TensorRT and Triton backends, Ultralytics YOLO, BoxMOT/BoTSORT, OpenCV, and
+aiohttp.

@@ -78,6 +78,7 @@ recordings/
 *.jpg
 *.jpeg
 *.png
+!docs/assets/*.png
 *.bmp
 *.tiff
 
